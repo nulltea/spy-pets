@@ -1,0 +1,22 @@
+[package]
+name = "ninja-pets"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.57"
+rand = "0.8.5"
+futures = "0.3.21"
+async-trait = "0.1.56"
+async-std = { version = "1.10.0", features = ["attributes"] }
+ethers = { version = "0.6.2" }
+two-party-adaptor = {path = "../two-party-adaptor"}
+curv-kzen = { version = "0.9", default-features = false }
+htlp = { path = "../HTLP"}
+hex = "0.4"
+
+backoff = {version = "0.4.0", features = ["tokio"]}
+
+url = "2"
