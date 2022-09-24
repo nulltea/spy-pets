@@ -1,3 +1,4 @@
+use std::ops::Add;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use curv::arithmetic::Converter;
@@ -9,9 +10,14 @@ pub use ethers::utils::WEI_IN_ETHER;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::PublicKey;
 use url::Url;
+use crate::types::transaction::eip2718::TypedTransaction;
+use futures::{pin_mut, StreamExt};
+use tokio::pin;
 
+
+#[derive(Clone)]
 pub struct Ethereum {
-    provider: Provider<Http>,
+    pub provider: Provider<Http>,
     chain_id: u64,
 }
 
@@ -29,27 +35,30 @@ impl Ethereum {
         })
     }
 
-    type Tx = TransactionRequest;
-
     pub fn compose_tx(
         &self,
         from: Address,
         to: Address,
         amount: f64,
-    ) -> anyhow::Result<(Self::Tx, H256)> {
-        let tx = TransactionRequest::new()
-            .chain_id(self.chain_id)
+    ) -> anyhow::Result<(TypedTransaction, H256)> {
+        let mut tx = TransactionRequest::new()
             .from(from)
             .to(to)
-            .value(parse_ether(amount).map_err(|e| anyhow!("error parsing ether: {e}"))?);
+            .gas_price(1000000000)// self.provider.get_gas_price().await.unwrap(
+            .gas(21000)
+            .chain_id(self.chain_id)
+            .value(parse_ether(amount).map_err(|e| anyhow!("error parsing ether: {e}"))?).into();
+
+        self.provider.fill_transaction(&mut tx, None);
 
         let tx_hash = tx.sighash();
 
         Ok((tx, tx_hash))
     }
 
-    pub async fn send(&self, tx: Self::Tx, wallet: &LocalWallet) -> anyhow::Result<H256> {
-        let client = SignerMiddleware::new(&self.provider, wallet);
+    pub async fn send(&self, tx: TypedTransaction, wallet: &LocalWallet) -> anyhow::Result<H256> {
+        let signer = wallet.clone().with_chain_id(self.chain_id);
+        let client = SignerMiddleware::new(self.provider.clone(), signer);
         let pending = client.send_transaction(tx, None).await?;
 
         Ok(match pending.await {
@@ -63,9 +72,9 @@ impl Ethereum {
         })
     }
 
-    pub async fn send_signed(&self, tx: Self::Tx, sig: &two_party_adaptor::Signature) -> anyhow::Result<H256> {
-        let from = tx.from.unwrap();
-        let m = tx.sighash(self.chain_id);
+    pub async fn send_signed(&self, tx: TypedTransaction, sig: &two_party_adaptor::Signature) -> anyhow::Result<H256> {
+        let from = tx.from().unwrap().clone();
+        let m = tx.sighash();
         let r = U256::from_big_endian(&sig.r.to_bytes());
         let s = U256::from_big_endian(&sig.s.to_bytes());
         let v = {
@@ -86,6 +95,7 @@ impl Ethereum {
             .await
             .map_err(|e| anyhow!("error sending raw decrypted transaction: {e}"))?;
 
+
         Ok(match pending.await {
             Ok(Some(rec)) => rec.transaction_hash,
             Ok(None) => {
@@ -97,29 +107,46 @@ impl Ethereum {
         })
     }
 
-    pub async fn get_signature(&self, hash: H256) -> anyhow::Result<Option<two_party_adaptor::Signature>> {
-        self.provider
-            .get_transaction(hash)
-            .await
-            .map_err(|e| anyhow!("error getting tx: {e}"))
-            .map(|v| {
-                v.map(|tx| {
-                    let mut r = [0; 32];
-                    let mut s = [0; 32];
+    pub async fn listen_for_signature(&self, address: Address) -> anyhow::Result<two_party_adaptor::Signature> {
+        let mut pending_txns = self.provider.watch_pending_transactions().await.unwrap();
+        let pending_txns = pending_txns.filter_map(|tx_hash| async move {
+            return match self.provider
+                .get_transaction(tx_hash)
+                .await
+                .map_err(|e| anyhow!("error getting tx: {e}"))
+                .map(|v| {
+                    v.map(|tx| {
+                        let mut r = [0; 32];
+                        let mut s = [0; 32];
 
-                    tx.r.to_big_endian(&mut r);
-                    tx.s.to_big_endian(&mut s);
+                        tx.r.to_big_endian(&mut r);
+                        tx.s.to_big_endian(&mut s);
 
-                    two_party_adaptor::Signature {
-                        r: two_party_adaptor::BigInt::from_bytes(&r),
-                        s: two_party_adaptor::BigInt::from_bytes(&s),
-                    }
+                        (tx.from, two_party_adaptor::Signature {
+                            r: two_party_adaptor::BigInt::from_bytes(&r),
+                            s: two_party_adaptor::BigInt::from_bytes(&s),
+                        })
+                    })
                 })
-            })
+            {
+                Ok(Some((from, sig))) =>
+                    if from == address {
+                        Some(Ok(sig))
+                    } else {
+                        None
+                    }
+                Err(e) => {
+                    return Some(Err(e))
+                },
+                _ => None
+            }
+        }).fuse();
+        pin!(pending_txns);
+        pending_txns.select_next_some().await
     }
 
     pub fn address_from_pk(&self, pk: &Point<Secp256k1>) -> Address {
-        let public_key = PublicKey::from_sec1_bytes(pk.to_bytes(false).as_bytes()).unwrap();
+        let public_key = PublicKey::from_sec1_bytes(&pk.to_bytes(false)).unwrap();
         let public_key = public_key.to_encoded_point(false);
         let public_key = public_key.as_bytes();
         debug_assert_eq!(public_key[0], 0x04);

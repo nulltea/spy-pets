@@ -9,14 +9,23 @@ edition = "2021"
 anyhow = "1.0.57"
 rand = "0.8.5"
 futures = "0.3.21"
+futures-util = "0.3"
 async-trait = "0.1.56"
 async-std = { version = "1.10.0", features = ["attributes"] }
-ethers = { version = "0.6.2" }
+ethers = { version = "0.13.0" }
 two-party-adaptor = {path = "../two-party-adaptor"}
 curv-kzen = { version = "0.9", default-features = false }
 htlp = { path = "../HTLP"}
 hex = "0.4"
 
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 backoff = {version = "0.4.0", features = ["tokio"]}
+
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+rocket = { version = "0.5.0-rc.2", features = ["json"] }
+
+gumdrop = "0.8"
 
 url = "2"
