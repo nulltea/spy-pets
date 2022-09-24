@@ -11,6 +11,7 @@ use curv::arithmetic::Converter;
 use ethers::prelude::*;
 use futures::channel::oneshot;
 use futures::SinkExt;
+use gumdrop::Options;
 use url::Url;
 use crate::args::CLIArgs;
 use crate::ethereum::{Ethereum, WEI_IN_ETHER};
@@ -46,78 +47,54 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn setup(args: SetupArgs) {
+async fn setup(args: SetupArgs) -> anyhow::Result<()> {
 
+    Ok(())
 }
 
-async fn provide(args: ProvideArgs) {
-    let amount = 1.0;
-    let rpc_url = Url::parse("http://127.0.0.1:8545").unwrap();
-    let eth_provider = Ethereum::new(rpc_url).await.unwrap();
-    let alice_wallet = LocalWallet::from_str("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80").unwrap();
+async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
+    let rpc_url = Url::parse(&args.rpc_address).map_err(|e| anyhow!("bad rpc address: {e}"))?;
+    let eth_provider = Ethereum::new(rpc_url).await?;
+    let wallet = LocalWallet::from_str("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80").unwrap();
 
-    let alice_addr2 = Address::from_str("1B663f7F4eE9fe8D9c491bb3679f1ad7560cfA99").unwrap();
-    let (alice, mut to_alice) = Maker::new(eth_provider.clone(), alice_wallet, alice_addr2).unwrap();
+    let target_address = Address::from_str(&args.target_address).map_err(|e| anyhow!("error parsing target address: {e}"))?;
+    let (alice, mut to_alice) = Maker::new(eth_provider.clone(), wallet, target_address).unwrap();
 
     tokio::spawn(async {
         alice.run().await;
     });
 
     server::serve(to_alice).await;
+
+    Ok(())
 }
 
-async fn swap(args: SwapArgs) {
-    // let amount = 1.0;
-    // let rpc_url = Url::parse("http://127.0.0.1:8545").unwrap();
-    // let eth_provider = Ethereum::new(rpc_url).await.unwrap();
-    // let alice_wallet = LocalWallet::from_str("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80").unwrap();
-    //
-    // let alice_addr2 = Address::from_str("1B663f7F4eE9fe8D9c491bb3679f1ad7560cfA99").unwrap();
-    // let (alice, mut to_alice) = Maker::new(eth_provider.clone(), alice_wallet, alice_addr2).unwrap();
-    //
-    // tokio::spawn(async {
-    //     alice.run().await;
-    // });
-    //
-    // let bob_wallet = LocalWallet::from_str("59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d").unwrap();
-    // let bob_addr2 = Address::from_str("DB2441c05Ec776BE89C6BC9bE98CB74e671E5aF0").unwrap();
-    // let mut bob = Taker::new(eth_provider.clone(), bob_wallet, bob_addr2, amount);
-    // let bob_setup_msg1 = bob.setup1().unwrap();
-    //
-    // let (resp_tx, resp_rx) = oneshot::channel();
-    // let _ = to_alice.send(maker::MakerMsg::Setup {
-    //     msg: bob_setup_msg1,
-    //     resp_tx
-    // }).await;
-    // let alice_setup_msg = resp_rx.await.unwrap().unwrap();
-    //
-    // let bob_setup_msg1 = bob.setup2(alice_setup_msg).await.unwrap();
-    //
-    // let (resp_tx, resp_rx) = oneshot::channel();
-    // let _ = to_alice.send(maker::MakerMsg::Lock1 {
-    //     amount,
-    //     msg: bob_setup_msg1,
-    //     resp_tx
-    // }).await;
-    // let alice_lock_msg1 = resp_rx.await.unwrap().unwrap();
-    //
-    // let bob_lock_msg = bob.lock(alice_lock_msg1).unwrap();
-    //
-    // let (resp_tx, resp_rx) = oneshot::channel();
-    // let _ = to_alice.send(maker::MakerMsg::Lock2 {
-    //     msg: bob_lock_msg,
-    //     resp_tx
-    // }).await;
-    // let alice_lock_msg2 = resp_rx.await.unwrap().unwrap();
-    // let _ = bob.complete(alice_lock_msg2).await.unwrap();
-    //
-    // loop {
-    //     let x = eth_provider.provider.get_balance(bob_addr2, None).await.unwrap();
-    //     let b = x / WEI_IN_ETHER;
-    //     println!("balance of bob's {bob_addr2} is {}", b.as_u64());
-    //     let x = eth_provider.provider.get_balance(alice_addr2, None).await.unwrap();
-    //     let b = x / WEI_IN_ETHER;
-    //     println!("balance of alice's {bob_addr2} is {}", b.as_u64());
-    //     sleep(Duration::from_secs(2))
-    // }
+async fn swap(args: SwapArgs) -> anyhow::Result<()> {
+    let rpc_url = Url::parse(&args.rpc_address).map_err(|e| anyhow!("bad rpc address: {e}"))?;
+    let eth_provider = Ethereum::new(rpc_url).await?;
+    let wallet = LocalWallet::from_str("59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d").unwrap();
+
+    let target_address = Address::from_str(&args.target_address).map_err(|e| anyhow!("error parsing target address: {e}"))?;
+
+    let client = client::Client::new(args.maker_address)?;
+
+    let mut bob = Taker::new(eth_provider.clone(), wallet, target_address, args.amount);
+    let setup_msg = bob.setup1()?;
+
+    let alice_setup_msg = client.setup(setup_msg).await?;
+
+    let lock_msg1 = bob.setup2(alice_setup_msg).await?;
+
+    let alice_lock_msg = client.lock(args.amount, lock_msg1).await?;
+
+    let lock_msg2 = bob.lock(alice_lock_msg)?;
+
+    let alice_swap_msg = client.swap(lock_msg2).await?;
+    let _ = bob.complete(alice_swap_msg).await?;
+
+    let wei = eth_provider.provider.get_balance(Address::from_str(&args.target_address).unwrap(), None).await.unwrap();
+    let eth = wei / WEI_IN_ETHER;
+    println!("balance of {} is {} ETH", args.target_address, eth.as_u64());
+
+    Ok(())
 }

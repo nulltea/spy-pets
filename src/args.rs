@@ -34,6 +34,9 @@ pub struct ProvideArgs {
 
     #[options(help = "chain id", default = "http://localhost:8545")]
     pub chain_id: String,
+
+    #[options(help = "target address (to)")]
+    pub target_address: String
 }
 
 #[derive(Debug, Options, Clone)]
@@ -48,4 +51,10 @@ pub struct SwapArgs {
 
     #[options(help = "chain id", default = "31337")]
     pub chain_id: String,
+
+    #[options(help = "target address (to)")]
+    pub target_address: String,
+
+    #[options(help = "transfer amount (ETH)")]
+    pub amount: f64
 }

@@ -4,6 +4,7 @@ use curv::BigInt;
 use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 use ethers::prelude::*;
 use htlp::{lhp, ToBigUint};
+use serde::{Serialize, Deserialize};
 use two_party_adaptor::{party_one, party_two};
 use two_party_adaptor::party_two::{EcKeyPair, keygen, sign};
 use crate::ethereum::Ethereum;
@@ -12,7 +13,7 @@ use crate::types::transaction::eip2718::TypedTransaction;
 pub const SALT_STRING: &[u8] = &[75, 90, 101, 110];
 
 pub struct Taker {
-    address_to: Address,
+    target_address: Address,
     amount: f64,
 
     first_account: Party2SharedAccountState,
@@ -39,17 +40,14 @@ struct Party2SharedAccountState {
     shared_pk: Option<Point<Secp256k1>>,
 }
 
-#[serde(crate = "rocket::serde")]
 pub type SetupMsg = (keygen::KeyGenMsg1, keygen::KeyGenMsg1);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(crate = "rocket::serde")]
 pub struct LockMsg1 {
     pub commitment: sign::PreSignMsg1,
     pub share_vtc: htlp::structures::Puzzle,
 }
 
-#[serde(crate = "rocket::serde")]
 pub type LockMsg2 = (sign::PreSignMsg2, sign::PreSignMsg2);
 
 impl Taker
@@ -57,13 +55,13 @@ impl Taker
     pub fn new(
         chain_provider: Ethereum,
         wallet: LocalWallet,
-        address_to: Address,
+        target_address: Address,
         amount: f64,
     ) -> Self {
         let lhp_params = lhp::setup::setup(20, 1.to_biguint().unwrap());
 
         Self {
-            address_to,
+            target_address,
             amount,
             first_account: Default::default(),
             second_account: Default::default(),
@@ -145,11 +143,11 @@ impl Taker
         })
     }
 
-    pub fn lock(&mut self, msg: crate::maker::LockMsg1) -> anyhow::Result<LockMsg2> {
+    pub fn lock(&mut self, msg: crate::maker::LockMsg) -> anyhow::Result<LockMsg2> {
         let _ = self.sign_p1_pub_share.insert(msg.commitments.public_share.clone());
         let shared_addr2 = self.chain_provider.address_from_pk(self.second_account.shared_pk.as_ref().unwrap());
 
-        let (tx, tx_hash) = self.chain_provider.compose_tx(shared_addr2, self.address_to, self.amount).expect("tx to compose");
+        let (tx, tx_hash) = self.chain_provider.compose_tx(shared_addr2, self.target_address, self.amount).expect("tx to compose");
         let _ = self.tx.insert(tx);
 
         let pre_sig1 = {
@@ -187,7 +185,7 @@ impl Taker
         Ok((pre_sig1, pre_sig2))
     }
 
-    pub async fn complete(&mut self, swap_adaptor: crate::maker::LockMsg2) -> anyhow::Result<H256> {
+    pub async fn complete(&mut self, swap_adaptor: crate::maker::SwapMsg) -> anyhow::Result<H256> {
         let shared_addr2 = self.chain_provider.address_from_pk(self.second_account.shared_pk.as_ref().unwrap());
         // let (tx, hash) = self.chain_provider.compose_tx(shared_addr2, self.address_to, self.amount).expect("tx to compose");
         //

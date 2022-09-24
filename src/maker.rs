@@ -11,9 +11,12 @@ use two_party_adaptor::{EncryptedSignature, party_two};
 use htlp::{lhp, ToBigUint};
 use crate::ethereum::Ethereum;
 use crate::types::transaction::eip2718::TypedTransaction;
+use serde::{Serialize, Deserialize};
+use crate::WEI_IN_ETHER;
+
 
 pub struct Maker {
-    address_to: Address,
+    target_address: Address,
 
     from_takers: mpsc::Receiver<MakerMsg>,
     first_account: Party1SharedAccountState,
@@ -42,50 +45,48 @@ struct Party1SharedAccountState {
     shared_pk: Option<Point<Secp256k1>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SetupMsg {
     pub account1: (keygen::KeyGenMsg1, keygen::KeyGenMsg2),
     pub account2: (keygen::KeyGenMsg1, keygen::KeyGenMsg2),
     pub refund_vtc: htlp::structures::Puzzle,
 }
-#[derive(Debug)]
-pub struct LockMsg1 {
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LockMsg {
     pub commitments: sign::PreSignMsg1,
     pub tx_hash: BigInt,
 }
-pub type LockMsg2 = EncryptedSignature;
+pub type SwapMsg = EncryptedSignature;
 
 pub enum MakerMsg {
     Setup {
         msg: crate::taker::SetupMsg,
         resp_tx: oneshot::Sender<anyhow::Result<SetupMsg>>,
     },
-    Lock1 {
+    Lock {
         amount: f64,
         msg: crate::taker::LockMsg1,
-        resp_tx: oneshot::Sender<anyhow::Result<LockMsg1>>,
+        resp_tx: oneshot::Sender<anyhow::Result<LockMsg>>,
     },
-    Lock2 {
+    Swap {
         msg: crate::taker::LockMsg2,
-        resp_tx: oneshot::Sender<anyhow::Result<LockMsg2>>,
+        resp_tx: oneshot::Sender<anyhow::Result<SwapMsg>>,
     },
-    Complete {
-        hash: H256,
-    }
 }
 
 impl Maker {
     pub fn new(
         chain_provider: Ethereum,
         wallet: LocalWallet,
-        address_to: Address,
+        target_address: Address,
     ) -> anyhow::Result<(Self, mpsc::Sender<MakerMsg>)> {
         let (to_maker, from_takers) = mpsc::channel(1);
         let lhp_params = lhp::setup::setup(20, 18.to_biguint().unwrap());
 
         Ok((
             Self {
-                address_to,
+                target_address,
                 from_takers,
                 chain: chain_provider,
                 wallet,
@@ -157,7 +158,7 @@ impl Maker {
                             refund_vtc
                         })).unwrap();
                     }
-                    MakerMsg::Lock1 { amount, msg, resp_tx } => {
+                    MakerMsg::Lock { amount, msg, resp_tx } => {
                         let _ = self.refund_pzl.insert(msg.share_vtc);
                         let _ = self.sign_p2_commit.insert(msg.commitment);
 
@@ -169,15 +170,15 @@ impl Maker {
                         let (commitments, eph_share) = sign::first_message();
                         let _ = self.sign_share.insert(eph_share); // todo: ensure that it's fine to reuse k1 for multiple txns
 
-                        let (tx, tx_hash) = self.chain.compose_tx(shared_addr1, self.address_to, amount).expect("tx to compose");
+                        let (tx, tx_hash) = self.chain.compose_tx(shared_addr1, self.target_address, amount).expect("tx to compose");
                         let _ = self.tx.insert(tx);
 
-                        resp_tx.send(Ok(LockMsg1{
+                        resp_tx.send(Ok(LockMsg {
                             commitments,
                             tx_hash: BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..])
                         })).unwrap();
                     }
-                    MakerMsg::Lock2 { msg, resp_tx } => {
+                    MakerMsg::Swap { msg, resp_tx } => {
                         let prev_commit = self.sign_p2_commit.take().unwrap();
                         sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.0).expect("expect valid");
                         sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.1).expect("expect valid");
@@ -218,6 +219,10 @@ impl Maker {
                         );
 
                         self.chain.send_signed(self.tx.take().unwrap(), &signature).await.unwrap();
+
+                        let wei = self.chain.provider.get_balance(self.target_address, None).await.unwrap();
+                        let eth = wei / WEI_IN_ETHER;
+                        println!("balance of {} is {} ETH", self.target_address, eth.as_u64());
                     }
                     _ => {}
                 }

@@ -13,35 +13,19 @@ struct Runtime {
     tx: mpsc::Sender<MakerMsg>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(crate = "rocket::serde")]
-struct InfoResponse {
-    price: f64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(crate = "rocket::serde")]
-struct Step1Response {
-    ciphertext: Vec<u8>,
-    proof_of_encryption: Vec<u8>,
-    data_pk: String,
-    address: String,
-}
-
-#[derive(Deserialize)]
-#[serde(crate = "rocket::serde")]
-struct Step3Request<'r> {
-    pub_key: &'r str,
-    enc_sig: &'r str,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct LockRequest {
+    pub amount: f64,
+    pub msg: taker::LockMsg1
 }
 
 #[post("/setup", data = "<req>")]
-async fn setup(state: &State<Runtime>, req: taker::SetupMsg) -> Result<Json<maker::SetupMsg>, status::Custom<String>> {
+async fn setup(state: &State<Runtime>, req: Json<taker::SetupMsg>) -> Result<Json<maker::SetupMsg>, status::Custom<String>> {
     let (tx, rx) = oneshot::channel();
     state
         .tx
         .clone()
-        .send(MakerMsg::Setup { msg: req, resp_tx: tx })
+        .send(MakerMsg::Setup { msg: req.0, resp_tx: tx })
         .await
         .map_err(|e| status::Custom(Status::ServiceUnavailable, e.to_string()))?;
 
@@ -52,18 +36,18 @@ async fn setup(state: &State<Runtime>, req: taker::SetupMsg) -> Result<Json<make
     Ok(Json(res))
 }
 
-#[post("/lock1", data = "<req>")]
-async fn lock1(
+#[post("/lock", data = "<req>")]
+async fn lock(
     state: &State<Runtime>,
-    req: taker::LockMsg1
-) -> Result<Json<maker::LockMsg1>, status::Custom<String>> {
+    req: Json<LockRequest>
+) -> Result<Json<maker::LockMsg>, status::Custom<String>> {
     let (tx, rx) = oneshot::channel();
     state
         .tx
         .clone()
-        .send(MakerMsg::Lock1 {
-            amount: 1.0,
-            msg: req,
+        .send(MakerMsg::Lock {
+            amount: req.0.amount,
+            msg: req.0.msg,
             resp_tx: tx,
         })
         .await
@@ -77,17 +61,17 @@ async fn lock1(
     Ok(Json(res))
 }
 
-#[post("/lock2", data = "<req>")]
-async fn lock2(
+#[post("/swap", data = "<req>")]
+async fn swap(
     state: &State<Runtime>,
-    req: taker::LockMsg2
-) -> Result<Json<maker::LockMsg2>, status::Custom<String>> {
+    req: Json<taker::LockMsg2>
+) -> Result<Json<maker::SwapMsg>, status::Custom<String>> {
     let (tx, rx) = oneshot::channel();
     state
         .tx
         .clone()
-        .send(MakerMsg::Lock2 {
-            msg: req,
+        .send(MakerMsg::Swap {
+            msg: req.0,
             resp_tx: tx,
         })
         .await
@@ -102,12 +86,12 @@ async fn lock2(
 }
 
 #[allow(unused_must_use)]
-pub async fn serve(to_runtime: mpsc::Sender<SellerMsg>) {
+pub async fn serve(to_runtime: mpsc::Sender<maker::MakerMsg>) {
     rocket::build()
         .manage(Runtime {
             tx: to_runtime,
         })
-        .mount("/", routes![setup, lock1, lock2])
+        .mount("/", routes![setup, lock, swap])
         .launch()
         .await
         .expect("expect server to run");
