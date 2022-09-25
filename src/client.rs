@@ -40,11 +40,12 @@ impl Client {
             .map_err(|e| anyhow!("error decoding step1 response: {e}"))
     }
 
-    pub async fn lock(&self, amount: f64, msg: taker::LockMsg1) -> anyhow::Result<maker::LockMsg> {
+    pub async fn lock(&self, target_address: String, amount: f64, msg: taker::LockMsg1) -> anyhow::Result<maker::LockMsg> {
         let mut resp = self
             .client
             .post("lock")
             .body_json(&LockRequest {
+                target_address,
                 amount,
                 msg
             }).unwrap()

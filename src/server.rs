@@ -6,6 +6,7 @@ use rocket::response::status;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::{routes, State};
 use std::str::FromStr;
+use anyhow::anyhow;
 use crate::maker::MakerMsg;
 use crate::{maker, taker};
 
@@ -15,6 +16,7 @@ struct Runtime {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LockRequest {
+    pub target_address: String,
     pub amount: f64,
     pub msg: taker::LockMsg1
 }
@@ -42,10 +44,13 @@ async fn lock(
     req: Json<LockRequest>
 ) -> Result<Json<maker::LockMsg>, status::Custom<String>> {
     let (tx, rx) = oneshot::channel();
+    let target_address= Address::from_str(&req.target_address)
+        .map_err(|e| status::Custom(Status::BadRequest, "invalid target address".to_string()))?;
     state
         .tx
         .clone()
         .send(MakerMsg::Lock {
+            target_address,
             amount: req.0.amount,
             msg: req.0.msg,
             resp_tx: tx,

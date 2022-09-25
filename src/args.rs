@@ -11,9 +11,9 @@ pub struct CLIArgs {
 pub enum Command {
     #[options(help = "Setup wallet")]
     Setup(SetupArgs),
-    #[options(help = "Deploy seller daemon")]
+    #[options(help = "Deploy provider daemon")]
     Provide(ProvideArgs),
-    #[options(help = "Run buyer client")]
+    #[options(help = "Run swap client")]
     Swap(SwapArgs),
 }
 
@@ -29,6 +29,15 @@ pub struct SetupArgs {
 pub struct ProvideArgs {
     help: bool,
 
+    #[options(help = "path to keystore location", default = "./keys")]
+    pub keystore_dir: String,
+
+    #[options(help = "wallet name")]
+    pub wallet_name: Option<String>,
+
+    #[options(help = "wallet password")]
+    pub password: Option<String>,
+
     #[options(help = "chain RPC address", default = "http://localhost:8545")]
     pub rpc_address: String,
 
@@ -36,12 +45,24 @@ pub struct ProvideArgs {
     pub chain_id: String,
 
     #[options(help = "target address (to)")]
-    pub target_address: String
+    pub target_address: String,
+
+    #[options(help = "time parameter of the VTC scheme", default = "18")]
+    pub time_lock_param: u64
 }
 
 #[derive(Debug, Options, Clone)]
 pub struct SwapArgs {
     help: bool,
+
+    #[options(help = "path to keystore location", default = "./keys")]
+    pub keystore_dir: String,
+
+    #[options(help = "wallet name")]
+    pub wallet_name: Option<String>,
+
+    #[options(help = "wallet password")]
+    pub password: Option<String>,
 
     #[options(help = "maker server address")]
     pub maker_address: String,
@@ -56,5 +77,8 @@ pub struct SwapArgs {
     pub target_address: String,
 
     #[options(help = "transfer amount (ETH)")]
-    pub amount: f64
+    pub amount: f64,
+
+    #[options(help = "time parameter of the VTC scheme", default = "18")]
+    pub time_lock_param: u64
 }

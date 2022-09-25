@@ -1,11 +1,16 @@
+use std::borrow::Borrow;
+use std::ops::Add;
 use anyhow::anyhow;
 use backoff::ExponentialBackoff;
 use curv::arithmetic::Converter;
 use curv::BigInt;
-use curv::elliptic::curves::{Point, Secp256k1};
+use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 use ethers::prelude::*;
+use ethers::prelude::k256::ecdsa::SigningKey;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{select, FutureExt, SinkExt};
 use two_party_adaptor::party_one::{keygen, EcKeyPair, CommWitness, PaillierKeyPair, Party1Private, sign, EphEcKeyPair};
 use two_party_adaptor::{EncryptedSignature, party_two};
 use htlp::{lhp, ToBigUint};
@@ -14,9 +19,9 @@ use crate::types::transaction::eip2718::TypedTransaction;
 use serde::{Serialize, Deserialize};
 use crate::WEI_IN_ETHER;
 
-
 pub struct Maker {
     target_address: Address,
+    refund_time_param: u64,
 
     from_takers: mpsc::Receiver<MakerMsg>,
     first_account: Party1SharedAccountState,
@@ -31,9 +36,6 @@ pub struct Maker {
 
     chain: Ethereum,
     wallet: LocalWallet,
-
-    refund_pzl: Option<htlp::structures::Puzzle>,
-    lhp_params: htlp::structures::Params,
 }
 
 #[derive(Default)]
@@ -49,11 +51,13 @@ struct Party1SharedAccountState {
 pub struct SetupMsg {
     pub account1: (keygen::KeyGenMsg1, keygen::KeyGenMsg2),
     pub account2: (keygen::KeyGenMsg1, keygen::KeyGenMsg2),
+    pub vtc_params: htlp::structures::Params,
     pub refund_vtc: htlp::structures::Puzzle,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LockMsg {
+    pub target_address: Address,
     pub commitments: sign::PreSignMsg1,
     pub tx_hash: BigInt,
 }
@@ -65,6 +69,7 @@ pub enum MakerMsg {
         resp_tx: oneshot::Sender<anyhow::Result<SetupMsg>>,
     },
     Lock {
+        target_address: Address,
         amount: f64,
         msg: crate::taker::LockMsg1,
         resp_tx: oneshot::Sender<anyhow::Result<LockMsg>>,
@@ -80,13 +85,14 @@ impl Maker {
         chain_provider: Ethereum,
         wallet: LocalWallet,
         target_address: Address,
+        refund_time_param: u64,
     ) -> anyhow::Result<(Self, mpsc::Sender<MakerMsg>)> {
         let (to_maker, from_takers) = mpsc::channel(1);
-        let lhp_params = lhp::setup::setup(20, 18.to_biguint().unwrap());
 
         Ok((
             Self {
                 target_address,
+                refund_time_param,
                 from_takers,
                 chain: chain_provider,
                 wallet,
@@ -94,8 +100,6 @@ impl Maker {
                 second_account: Default::default(),
                 sign_p2_commit:  Default::default(),
                 sign_share: Default::default(),
-                refund_pzl: Default::default(),
-                lhp_params,
                 tx: None,
                 signature: None
             },
@@ -104,9 +108,13 @@ impl Maker {
     }
 
     pub async fn run(mut self) {
+        let mut puzzle_tasks = FuturesUnordered::new();
+        let mut service_messages = self.from_takers.fuse();
+
+
         loop {
-            if let Some(msg) = self.from_takers.next().await {
-                match msg {
+            select! {
+                msg = service_messages.select_next_some() => match msg {
                     MakerMsg::Setup { msg, resp_tx } => {
                         let (msg1, msg2) = msg;
 
@@ -146,21 +154,38 @@ impl Maker {
                             (res1, res2)
                         };
 
-                        let refund_witness = self.second_account.key_share.as_ref().unwrap().export();
+                        let refund_witness = self.second_account.key_share.as_ref().unwrap().secret_share.to_bigint();
+                        let vtc_params = lhp::setup::setup(
+                            two_party_adaptor::SECURITY_BITS as u64,
+                            self.refund_time_param.to_biguint().unwrap()
+                        );
                         let refund_vtc = lhp::generate::gen(
-                            &self.lhp_params,
+                            &vtc_params,
                             htlp::BigUint::from_bytes_be(&*refund_witness.to_bytes())
                         );
 
                         resp_tx.send(Ok(SetupMsg {
                             account1,
                             account2,
+                            vtc_params,
                             refund_vtc
                         })).unwrap();
                     }
-                    MakerMsg::Lock { amount, msg, resp_tx } => {
-                        let _ = self.refund_pzl.insert(msg.share_vtc);
+                    MakerMsg::Lock { target_address, amount, msg, resp_tx } => {
                         let _ = self.sign_p2_commit.insert(msg.commitment);
+
+                        {
+                            let addr = self.chain.address_from_pk(self.first_account.shared_pk.as_ref().unwrap());
+                            let pp = msg.vtc_params.clone();
+                            let vtc = msg.refund_vtc.clone();
+                            puzzle_tasks.push(tokio::task::spawn_blocking(move ||{
+                                (
+                                    addr,
+                                    amount,
+                                    lhp::solve::solve(&pp, &vtc),
+                                )
+                            }));
+                        }
 
                         let local_addr = self.wallet.address();
                         let shared_addr1 = self.chain.address_from_pk(self.first_account.shared_pk.as_ref().unwrap());
@@ -170,10 +195,11 @@ impl Maker {
                         let (commitments, eph_share) = sign::first_message();
                         let _ = self.sign_share.insert(eph_share); // todo: ensure that it's fine to reuse k1 for multiple txns
 
-                        let (tx, tx_hash) = self.chain.compose_tx(shared_addr1, self.target_address, amount).expect("tx to compose");
+                        let (tx, tx_hash) = self.chain.compose_tx(shared_addr1, target_address, amount).expect("tx to compose");
                         let _ = self.tx.insert(tx);
 
                         resp_tx.send(Ok(LockMsg {
+                            target_address: self.target_address,
                             commitments,
                             tx_hash: BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..])
                         })).unwrap();
@@ -225,6 +251,22 @@ impl Maker {
                         println!("balance of {} is {} ETH", self.target_address, eth.as_u64());
                     }
                     _ => {}
+                },
+                puzzle_solution = puzzle_tasks.select_next_some() => {
+                    if let Ok((addr, amount, dlog)) = puzzle_solution {
+                        let balance = self.chain.provider.get_balance(addr, None).await.unwrap().as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
+                        if balance > amount {
+                            let dlog: htlp::BigUint = dlog;
+                            let sk1 = Scalar::from_bigint(&BigInt::from_bytes(&dlog.to_bytes_be()));
+                            let full_sk = &sk1 * &self.first_account.key_share.as_ref().unwrap().secret_share;
+                            let signer = LocalWallet::from(SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap());
+                            let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), amount).unwrap();
+                            self.chain.send(tx, &signer).await.unwrap();
+                            println!("swap failed, funds were refunded to {}", self.wallet.address());
+                        }
+                    } else {
+                        println!("timeout passed, all good.");
+                    }
                 }
             }
         }
