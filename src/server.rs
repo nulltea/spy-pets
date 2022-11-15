@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use ethers::prelude::*;
 use futures::channel::{mpsc, oneshot};
 use futures_util::{SinkExt, TryFutureExt};
@@ -6,7 +7,8 @@ use rocket::response::status;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::{routes, State};
 use std::str::FromStr;
-use anyhow::anyhow;
+
+use tracing::{info_span, Instrument};
 use crate::maker::MakerMsg;
 use crate::{maker, taker};
 
@@ -31,7 +33,7 @@ async fn setup(state: &State<Runtime>, req: Json<taker::SetupMsg>) -> Result<Jso
         .await
         .map_err(|e| status::Custom(Status::ServiceUnavailable, e.to_string()))?;
 
-    let res = rx.await
+    let res = rx.instrument(info_span!("maker::setup")).await
         .map_err(|e| status::Custom(Status::ServiceUnavailable, e.to_string()))?
         .map_err(|e| status::Custom(Status::InternalServerError, e.to_string()))?;
 
@@ -45,7 +47,7 @@ async fn lock(
 ) -> Result<Json<maker::LockMsg>, status::Custom<String>> {
     let (tx, rx) = oneshot::channel();
     let target_address= Address::from_str(&req.target_address)
-        .map_err(|e| status::Custom(Status::BadRequest, "invalid target address".to_string()))?;
+        .map_err(|_e| status::Custom(Status::BadRequest, "invalid target address".to_string()))?;
     state
         .tx
         .clone()
@@ -59,6 +61,7 @@ async fn lock(
         .map_err(|e| status::Custom(Status::ServiceUnavailable, e.to_string()))?;
 
     let res = rx
+        .instrument(info_span!("maker::lock"))
         .await
         .map_err(|e| status::Custom(Status::ServiceUnavailable, e.to_string()))?
         .map_err(|e| status::Custom(Status::InternalServerError, e.to_string()))?;
@@ -83,6 +86,7 @@ async fn swap(
         .map_err(|e| status::Custom(Status::ServiceUnavailable, e.to_string()))?;
 
     let res = rx
+        .instrument(info_span!("maker::swap"))
         .await
         .map_err(|e| status::Custom(Status::ServiceUnavailable, e.to_string()))?
         .map_err(|e| status::Custom(Status::InternalServerError, e.to_string()))?;
@@ -91,7 +95,14 @@ async fn swap(
 }
 
 #[allow(unused_must_use)]
-pub async fn serve(to_runtime: mpsc::Sender<maker::MakerMsg>) {
+pub async fn serve(to_runtime: mpsc::Sender<maker::MakerMsg>, addr: String) {
+    let addr: SocketAddr = addr.parse().expect("valid address");
+    let mut config = rocket::Config::default();
+    config.address = addr.ip();
+    config.port = addr.port();
+    config.shutdown.ctrlc = true;
+    config.shutdown.force = true;
+
     rocket::build()
         .manage(Runtime {
             tx: to_runtime,

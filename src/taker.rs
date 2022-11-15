@@ -7,7 +7,7 @@ use ethers::prelude::k256::ecdsa::SigningKey;
 use ethers::utils::WEI_IN_ETHER;
 use htlp::{lhp, ToBigUint};
 use serde::{Serialize, Deserialize};
-use two_party_adaptor::{party_one, party_two};
+use two_party_adaptor::{party_one};
 use two_party_adaptor::party_two::{EcKeyPair, keygen, sign};
 use crate::ethereum::Ethereum;
 use crate::types::transaction::eip2718::TypedTransaction;
@@ -136,9 +136,9 @@ impl Taker
                         let signer = LocalWallet::from(SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap());
                         let (tx, _) = me.chain.compose_tx(addr, me.wallet.address(), me.amount).unwrap();
                         me.chain.send(tx, &signer).await.unwrap();
-                        println!("swap failed, funds were refunded to {}", me.wallet.address());
+                        warn!("swap failed, funds were refunded to {}", me.wallet.address());
                     } else {
-                        println!("timeout passed, all good.");
+                        info!("timeout passed, all good.");
                     }
                 });
             });

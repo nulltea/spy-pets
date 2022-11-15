@@ -1,18 +1,19 @@
-use std::ops::Add;
+
 use anyhow::anyhow;
-use async_trait::async_trait;
+
 use curv::arithmetic::Converter;
-use curv::elliptic::curves::{Point, Scalar, Secp256k1};
-use ethers::core::k256::ecdsa::SigningKey;
+use curv::elliptic::curves::{Point, Secp256k1};
+
 use ethers::prelude::*;
 use ethers::utils::{keccak256, parse_ether};
 pub use ethers::utils::WEI_IN_ETHER;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::PublicKey;
-use url::Url;
+
 use crate::types::transaction::eip2718::TypedTransaction;
-use futures::{pin_mut, StreamExt};
+use futures::{StreamExt};
 use tokio::pin;
+use crate::Network;
 
 
 #[derive(Clone)]
@@ -22,8 +23,8 @@ pub struct Ethereum {
 }
 
 impl Ethereum {
-    pub async fn new(url: impl Into<Url>) -> anyhow::Result<Self> {
-        let provider = Provider::new(Http::new(url));
+    pub async fn new(networks: &Network) -> anyhow::Result<Self> {
+        let provider = Provider::new(Http::new(networks.get_endpoint()));
         let chain_id = provider
             .get_chainid()
             .await
@@ -108,7 +109,7 @@ impl Ethereum {
     }
 
     pub async fn listen_for_signature(&self, address: Address) -> anyhow::Result<two_party_adaptor::Signature> {
-        let mut pending_txns = self.provider.watch_pending_transactions().await.unwrap();
+        let pending_txns = self.provider.watch_pending_transactions().await.unwrap();
         let pending_txns = pending_txns.filter_map(|tx_hash| async move {
             return match self.provider
                 .get_transaction(tx_hash)

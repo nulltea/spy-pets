@@ -1,7 +1,7 @@
-use std::borrow::Borrow;
-use std::ops::Add;
-use anyhow::anyhow;
-use backoff::ExponentialBackoff;
+
+
+
+
 use curv::arithmetic::Converter;
 use curv::BigInt;
 use curv::elliptic::curves::{Point, Scalar, Secp256k1};
@@ -18,6 +18,7 @@ use crate::ethereum::Ethereum;
 use crate::types::transaction::eip2718::TypedTransaction;
 use serde::{Serialize, Deserialize};
 use crate::WEI_IN_ETHER;
+use tracing::log::{info, warn};
 
 pub struct Maker {
     target_address: Address,
@@ -110,7 +111,6 @@ impl Maker {
     pub async fn run(mut self) {
         let mut puzzle_tasks = FuturesUnordered::new();
         let mut service_messages = self.from_takers.fuse();
-
 
         loop {
             select! {
@@ -248,7 +248,7 @@ impl Maker {
 
                         let wei = self.chain.provider.get_balance(self.target_address, None).await.unwrap();
                         let eth = wei / WEI_IN_ETHER;
-                        println!("balance of {} is {} ETH", self.target_address, eth.as_u64());
+                        info!("balance of {} is {} ETH", self.target_address, eth.as_u64());
                     }
                     _ => {}
                 },
@@ -262,7 +262,7 @@ impl Maker {
                             let signer = LocalWallet::from(SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap());
                             let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), amount).unwrap();
                             self.chain.send(tx, &signer).await.unwrap();
-                            println!("swap failed, funds were refunded to {}", self.wallet.address());
+                            warn!("swap failed, funds were refunded to {}", self.wallet.address());
                         }
                     } else {
                         println!("timeout passed, all good.");

@@ -3,7 +3,7 @@ use ethers::prelude::coins_bip39::English;
 use ethers::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::str::FromStr;
+
 use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 use crate::k256::ecdsa::SigningKey;
 

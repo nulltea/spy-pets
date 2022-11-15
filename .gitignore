@@ -17,3 +17,7 @@ Cargo.lock
 .idea/
 
 keys/
+
+.DS_Store
+
+paper/
