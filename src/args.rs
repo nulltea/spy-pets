@@ -1,6 +1,8 @@
 use clap::{Args, Parser};
-use url::Url;
 use strum::EnumString;
+use url::Url;
+
+pub const NETWORK_FEE_DELTA: f64 = 0.1;
 
 #[derive(Clone, Parser)]
 pub struct Options {
@@ -20,13 +22,23 @@ pub enum Command {
 
 #[derive(Clone, Args)]
 pub struct SetupArgs {
-    #[clap(short, long, default_value = "./keys", help = "path to keystore location")]
+    #[clap(
+        short,
+        long,
+        default_value = "./keys",
+        help = "path to keystore location"
+    )]
     pub keystore_dir: String,
 }
 
 #[derive(Clone, Args)]
 pub struct ProvideArgs {
-    #[clap(short, long, default_value = "./keys", help = "path to keystore location")]
+    #[clap(
+        short,
+        long,
+        default_value = "./keys",
+        help = "path to keystore location"
+    )]
     pub keystore_dir: String,
 
     #[clap(short, long, help = "wallet name")]
@@ -41,16 +53,31 @@ pub struct ProvideArgs {
     #[clap(short, long, help = "secondary address (to)")]
     pub secondary_address: String,
 
-    #[clap(short, long, default_value = "18", help = "time parameter of the VTC scheme")]
+    #[clap(
+        short,
+        long,
+        default_value = "18",
+        help = "time parameter of the VTC scheme"
+    )]
     pub time_lock_param: u64,
 
-    #[clap(short='a', default_value = "127.0.0.1:8000", long, help = "server address")]
+    #[clap(
+        short = 'a',
+        default_value = "127.0.0.1:8000",
+        long,
+        help = "server address"
+    )]
     pub server_address: String,
 }
 
 #[derive(Clone, Args)]
 pub struct SwapArgs {
-    #[clap(short, long, default_value = "./keys", help = "path to keystore location")]
+    #[clap(
+        short,
+        long,
+        default_value = "./keys",
+        help = "path to keystore location"
+    )]
     pub keystore_dir: String,
 
     #[clap(short, long, help = "wallet name")]
@@ -68,10 +95,15 @@ pub struct SwapArgs {
     #[clap(short, long, help = "transfer amount (ETH)")]
     pub amount: f64,
 
-    #[clap(short, long, default_value = "18", help = "time parameter of the VTC scheme")]
+    #[clap(
+        short,
+        long,
+        default_value = "18",
+        help = "time parameter of the VTC scheme"
+    )]
     pub time_lock_param: u64,
 
-    #[clap(index=1, help = "target address (to)")]
+    #[clap(index = 1, help = "target address (to)")]
     pub target_address: String,
 }
 
@@ -88,8 +120,12 @@ pub enum Network {
 impl Network {
     pub fn get_endpoint(&self) -> Url {
         match self {
-            Network::Mainnet => Url::parse("https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27").unwrap(),
-            Network::Goerli => Url::parse("https://goerli.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27").unwrap(),
+            Network::Mainnet => {
+                Url::parse("https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27").unwrap()
+            }
+            Network::Goerli => {
+                Url::parse("https://goerli.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27").unwrap()
+            }
             Network::Development => Url::parse("http://localhost:8545").unwrap(),
         }
     }

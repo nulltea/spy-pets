@@ -1,42 +1,61 @@
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
-
-
-
+use crate::ethereum::Ethereum;
+use crate::types::transaction::eip2718::TypedTransaction;
+use crate::WEI_IN_ETHER;
 use curv::arithmetic::Converter;
-use curv::BigInt;
 use curv::elliptic::curves::{Point, Scalar, Secp256k1};
-use ethers::prelude::*;
+use curv::BigInt;
 use ethers::prelude::k256::ecdsa::SigningKey;
+use ethers::prelude::*;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{select, FutureExt, SinkExt};
-use two_party_adaptor::party_one::{keygen, EcKeyPair, CommWitness, PaillierKeyPair, Party1Private, sign, EphEcKeyPair};
-use two_party_adaptor::{EncryptedSignature, party_two};
 use htlp::{lhp, ToBigUint};
-use crate::ethereum::Ethereum;
-use crate::types::transaction::eip2718::TypedTransaction;
-use serde::{Serialize, Deserialize};
-use crate::WEI_IN_ETHER;
+use serde::{Deserialize, Serialize};
 use tracing::log::{info, warn};
+use two_party_adaptor::party_one::{
+    keygen, sign, CommWitness, EcKeyPair, EphEcKeyPair, PaillierKeyPair, Party1Private,
+};
+use two_party_adaptor::{party_two, EncryptedSignature};
 
 pub struct Maker {
-    target_address: Address,
+    secondary_address: Address,
     refund_time_param: u64,
 
-    from_takers: mpsc::Receiver<MakerMsg>,
-    first_account: Party1SharedAccountState,
-    second_account: Party1SharedAccountState,
-
-    sign_p2_commit: Option<party_two::sign::PreSignMsg1>,
-
-    sign_share: Option<EphEcKeyPair>,
-    tx: Option<TypedTransaction>,
-    signature: Option<two_party_adaptor::Signature>,
-    // swap_adaptor: Option<EncryptedSignature>,
+    from_takers: mpsc::Receiver<MakerRequest>,
+    sessions: HashMap<String, SessionState>,
 
     chain: Ethereum,
     wallet: LocalWallet,
+}
+
+struct SessionState {
+    requested_amount: f64,
+
+    s1: Party1SharedAccountState,
+    s2: Party1SharedAccountState,
+
+    sign_p2_commit: Option<party_two::sign::PreSignMsg1>,
+    sign_share: Option<EphEcKeyPair>,
+    tx: Option<TypedTransaction>,
+    signature: Option<two_party_adaptor::Signature>,
+}
+
+impl SessionState {
+    fn new(requested_amount: f64) -> Self {
+        Self {
+            requested_amount,
+            s1: Default::default(),
+            s2: Default::default(),
+            sign_p2_commit: None,
+            sign_share: None,
+            tx: None,
+            signature: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -52,30 +71,31 @@ struct Party1SharedAccountState {
 pub struct SetupMsg {
     pub account1: (keygen::KeyGenMsg1, keygen::KeyGenMsg2),
     pub account2: (keygen::KeyGenMsg1, keygen::KeyGenMsg2),
-    pub vtc_params: htlp::structures::Params,
-    pub refund_vtc: htlp::structures::Puzzle,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LockMsg {
-    pub target_address: Address,
     pub commitments: sign::PreSignMsg1,
+    pub vtc_params: htlp::structures::Params,
+    pub refund_vtc: htlp::structures::Puzzle,
     pub tx_hash: BigInt,
 }
 pub type SwapMsg = EncryptedSignature;
 
-pub enum MakerMsg {
+pub enum MakerRequest {
     Setup {
+        remote_addr: String,
+        amount: f64,
         msg: crate::taker::SetupMsg,
         resp_tx: oneshot::Sender<anyhow::Result<SetupMsg>>,
     },
     Lock {
-        target_address: Address,
-        amount: f64,
+        remote_addr: String,
         msg: crate::taker::LockMsg1,
         resp_tx: oneshot::Sender<anyhow::Result<LockMsg>>,
     },
     Swap {
+        remote_addr: String,
         msg: crate::taker::LockMsg2,
         resp_tx: oneshot::Sender<anyhow::Result<SwapMsg>>,
     },
@@ -85,24 +105,19 @@ impl Maker {
     pub fn new(
         chain_provider: Ethereum,
         wallet: LocalWallet,
-        target_address: Address,
+        secondary_address: Address,
         refund_time_param: u64,
-    ) -> anyhow::Result<(Self, mpsc::Sender<MakerMsg>)> {
+    ) -> anyhow::Result<(Self, mpsc::Sender<MakerRequest>)> {
         let (to_maker, from_takers) = mpsc::channel(1);
 
         Ok((
             Self {
-                target_address,
+                secondary_address,
                 refund_time_param,
                 from_takers,
+                sessions: Default::default(),
                 chain: chain_provider,
                 wallet,
-                first_account: Default::default(),
-                second_account: Default::default(),
-                sign_p2_commit:  Default::default(),
-                sign_share: Default::default(),
-                tx: None,
-                signature: None
             },
             to_maker,
         ))
@@ -115,46 +130,69 @@ impl Maker {
         loop {
             select! {
                 msg = service_messages.select_next_some() => match msg {
-                    MakerMsg::Setup { msg, resp_tx } => {
+                    MakerRequest::Setup { remote_addr, amount, msg, resp_tx } => {
+                        let session: &mut SessionState = match self.sessions.entry(remote_addr) {
+                            Entry::Vacant(e) => e.insert(SessionState::new(amount)),
+                            Entry::Occupied(_e) => panic!("unexpected message order")
+                        };
                         let (msg1, msg2) = msg;
 
                         let account1 = {
                             let (res1, comm_witness, key_share) = keygen::first_message();
-                            let _ = self.first_account.key_share.insert(key_share);
-                            let _ = self.first_account.key_comm_wit.insert(comm_witness.clone());
+                            let _ = session.s1.key_share.insert(key_share);
+                            let _ = session.s1.key_comm_wit.insert(comm_witness.clone());
 
-                            let key_share = self.first_account.key_share.as_ref().unwrap();
+                            let key_share = session.s1.key_share.as_ref().unwrap();
                             let (res2, paillier, private) = keygen::second_message(
                                 comm_witness,
                                 key_share,
                                 &msg1.d_log_proof,
                             ).expect("d_log invalid");
                             let shared_pk = keygen::compute_pubkey(key_share, &msg1.public_share);
-                            let _ = self.first_account.key_paillier.insert(paillier);
-                            let _ = self.first_account.key_private.insert(private);
-                            let _ = self.first_account.shared_pk.insert(shared_pk);
+                            let _ = session.s1.key_paillier.insert(paillier);
+                            let _ = session.s1.key_private.insert(private);
+                            let _ = session.s1.shared_pk.insert(shared_pk);
                             (res1, res2)
                         };
 
                         let account2 = {
                             let (res1, comm_witness, key_share) = keygen::first_message();
-                            let _ = self.second_account.key_share.insert(key_share);
-                            let _ = self.second_account.key_comm_wit.insert(comm_witness.clone());
+                            let _ = session.s2.key_share.insert(key_share);
+                            let _ = session.s2.key_comm_wit.insert(comm_witness.clone());
 
-                            let key_share = self.second_account.key_share.as_ref().unwrap();
+                            let key_share = session.s2.key_share.as_ref().unwrap();
                             let (res2, paillier, private) = keygen::second_message(
                                 comm_witness,
                                 key_share,
                                 &msg2.d_log_proof,
                             ).expect("d_log invalid");
                             let shared_pk = keygen::compute_pubkey(key_share, &msg2.public_share);
-                            let _ = self.second_account.key_paillier.insert(paillier);
-                            let _ = self.second_account.key_private.insert(private);
-                            let _ = self.second_account.shared_pk.insert(shared_pk);
+                            let _ = session.s2.key_paillier.insert(paillier);
+                            let _ = session.s2.key_private.insert(private);
+                            let _ = session.s2.shared_pk.insert(shared_pk);
                             (res1, res2)
                         };
 
-                        let refund_witness = self.second_account.key_share.as_ref().unwrap().secret_share.to_bigint();
+                        resp_tx.send(Ok(SetupMsg {
+                            account1,
+                            account2,
+                        })).unwrap();
+                    }
+                    MakerRequest::Lock { remote_addr, msg, resp_tx } => {
+                        let session = match self.sessions.get_mut(&remote_addr) {
+                            Some(e) => e,
+                            None => panic!("unexpected message order")
+                        };
+                        let _ = session.sign_p2_commit.insert(msg);
+
+                        let (commitments, eph_share) = sign::first_message();
+                        let _ = session.sign_share.insert(eph_share); // todo: ensure that it's fine to reuse k1 for multiple txns
+
+                        let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
+                        let (tx, tx_hash) = self.chain.compose_tx(s1, self.secondary_address, session.requested_amount).expect("tx to compose");
+                        let _ = session.tx.insert(tx);
+
+                        let refund_witness = session.s1.key_share.as_ref().unwrap().secret_share.to_bigint();
                         let vtc_params = lhp::setup::setup(
                             two_party_adaptor::SECURITY_BITS as u64,
                             self.refund_time_param.to_biguint().unwrap()
@@ -164,22 +202,34 @@ impl Maker {
                             htlp::BigUint::from_bytes_be(&*refund_witness.to_bytes())
                         );
 
-                        resp_tx.send(Ok(SetupMsg {
-                            account1,
-                            account2,
+                        resp_tx.send(Ok(LockMsg {
+                            commitments,
                             vtc_params,
-                            refund_vtc
+                            refund_vtc,
+                            tx_hash: BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..]),
                         })).unwrap();
                     }
-                    MakerMsg::Lock { target_address, amount, msg, resp_tx } => {
-                        let _ = self.sign_p2_commit.insert(msg.commitment);
+                    MakerRequest::Swap { remote_addr, msg, resp_tx } => {
+                        let session = match self.sessions.get_mut(&remote_addr) {
+                            Some(e) => e,
+                            None => panic!("unexpected message order")
+                        };
+
+                        let prev_commit = session.sign_p2_commit.take().unwrap();
+                        sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.account1).expect("expect valid");
+                        sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.account2).expect("expect valid");
+
+                        // todo: verify VTC
 
                         {
-                            let addr = self.chain.address_from_pk(self.first_account.shared_pk.as_ref().unwrap());
+                            let amount = session.requested_amount;
+                            let x_p1 = session.s2.key_share.as_ref().unwrap().secret_share.clone();
+                            let addr = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
                             let pp = msg.vtc_params.clone();
                             let vtc = msg.refund_vtc.clone();
                             puzzle_tasks.push(tokio::task::spawn_blocking(move ||{
                                 (
+                                    x_p1,
                                     addr,
                                     amount,
                                     lhp::solve::solve(&pp, &vtc),
@@ -188,77 +238,60 @@ impl Maker {
                         }
 
                         let local_addr = self.wallet.address();
-                        let shared_addr1 = self.chain.address_from_pk(self.first_account.shared_pk.as_ref().unwrap());
-                        let (tx, _) = self.chain.compose_tx(local_addr, shared_addr1, amount+0.1).expect("tx to compose");
+                        let s2 = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
+                        let (tx, _) = self.chain.compose_tx_with_fee(local_addr, s2, session.requested_amount).expect("tx to compose");
                         let _ = self.chain.send(tx, &self.wallet).await;
 
-                        let (commitments, eph_share) = sign::first_message();
-                        let _ = self.sign_share.insert(eph_share); // todo: ensure that it's fine to reuse k1 for multiple txns
-
-                        let (tx, tx_hash) = self.chain.compose_tx(shared_addr1, target_address, amount).expect("tx to compose");
-                        let _ = self.tx.insert(tx);
-
-                        resp_tx.send(Ok(LockMsg {
-                            target_address: self.target_address,
-                            commitments,
-                            tx_hash: BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..])
-                        })).unwrap();
-                    }
-                    MakerMsg::Swap { msg, resp_tx } => {
-                        let prev_commit = self.sign_p2_commit.take().unwrap();
-                        sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.0).expect("expect valid");
-                        sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.1).expect("expect valid");
-
                         let adaptor1 = sign::second_message(
-                            self.first_account.key_private.as_ref().unwrap(),
-                            &self.first_account.key_share.as_ref().unwrap().public_share,
-                            &msg.0.c3,
-                            self.sign_share.as_ref().unwrap(),
-                            &msg.0.comm_witness.public_share,
-                            &msg.0.k3_pair.public_share,
-                            &msg.0.message
+                            session.s1.key_private.as_ref().unwrap(),
+                            &session.s1.key_share.as_ref().unwrap().public_share,
+                            &msg.account1.c3,
+                            session.sign_share.as_ref().unwrap(),
+                            &msg.account1.comm_witness.public_share,
+                            &msg.account1.k3_pair.public_share,
+                            &msg.account1.message
                         );
                         // let _ = self.swap_adaptor.insert(adaptor1);
 
                         let adaptor2 = sign::second_message(
-                            self.second_account.key_private.as_ref().unwrap(),
-                            &self.second_account.key_share.as_ref().unwrap().public_share,
-                            &msg.1.c3,
-                            self.sign_share.as_ref().unwrap(),
-                            &msg.1.comm_witness.public_share,
-                            &msg.1.k3_pair.public_share,
-                            &msg.1.message
+                            session.s2.key_private.as_ref().unwrap(),
+                            &session.s2.key_share.as_ref().unwrap().public_share,
+                            &msg.account2.c3,
+                            session.sign_share.as_ref().unwrap(),
+                            &msg.account2.comm_witness.public_share,
+                            &msg.account2.k3_pair.public_share,
+                            &msg.account2.message
                         );
 
                         let _ = resp_tx.send(Ok(adaptor2.clone()));
 
                         // Complete:
-                        let shared_addr2 = self.chain.address_from_pk(self.second_account.shared_pk.as_ref().unwrap());
-                        let signature = self.chain.listen_for_signature(shared_addr2).await.unwrap();
+                        let s2 = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
+                        let signature = self.chain.listen_for_signature(s2).await.unwrap();
 
                         let decryption_key = sign::recover_witness(adaptor2, &signature);
 
                         let signature = party_two::sign::decrypt_signature(
                             &adaptor1, &decryption_key,
-                            &self.sign_share.as_ref().unwrap().public_share,
-                            &msg.0.k3_pair,
+                            &session.sign_share.as_ref().unwrap().public_share,
+                            &msg.account1.k3_pair,
                         );
 
-                        self.chain.send_signed(self.tx.take().unwrap(), &signature).await.unwrap();
+                        self.chain.send_signed(session.tx.take().unwrap(), &signature).await.unwrap();
 
-                        let wei = self.chain.provider.get_balance(self.target_address, None).await.unwrap();
+                        let wei = self.chain.provider.get_balance(self.secondary_address, None).await.unwrap();
                         let eth = wei / WEI_IN_ETHER;
-                        info!("balance of {} is {} ETH", self.target_address, eth.as_u64());
+                        info!("balance of {} is {} ETH", self.secondary_address, eth.as_u64());
                     }
                     _ => {}
                 },
                 puzzle_solution = puzzle_tasks.select_next_some() => {
-                    if let Ok((addr, amount, dlog)) = puzzle_solution {
+                    if let Ok((x_p1, addr, amount, dlog)) = puzzle_solution {
                         let balance = self.chain.provider.get_balance(addr, None).await.unwrap().as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
                         if balance > amount {
                             let dlog: htlp::BigUint = dlog;
-                            let sk1 = Scalar::from_bigint(&BigInt::from_bytes(&dlog.to_bytes_be()));
-                            let full_sk = &sk1 * &self.first_account.key_share.as_ref().unwrap().secret_share;
+                            let x_p2 = Scalar::from_bigint(&BigInt::from_bytes(&dlog.to_bytes_be()));
+                            let full_sk = &x_p1 * &x_p2;
                             let signer = LocalWallet::from(SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap());
                             let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), amount).unwrap();
                             self.chain.send(tx, &signer).await.unwrap();

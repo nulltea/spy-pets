@@ -1,12 +1,8 @@
 use anyhow::anyhow;
 
-
-
-
-
-use surf::Url;
+use crate::server::SetupRequest;
 use crate::{maker, taker};
-use crate::server::LockRequest;
+use surf::Url;
 
 pub struct Client {
     client: surf::Client,
@@ -22,11 +18,16 @@ impl Client {
         })
     }
 
-    pub async fn setup(&self, msg: taker::SetupMsg) -> anyhow::Result<maker::SetupMsg> {
+    pub async fn setup(
+        &self,
+        amount: f64,
+        msg: taker::SetupMsg,
+    ) -> anyhow::Result<maker::SetupMsg> {
         let mut resp = self
             .client
             .post("setup")
-            .body_json(&msg).unwrap()
+            .body_json(&SetupRequest { amount, msg })
+            .unwrap()
             .await
             .map_err(|e| anyhow!("error requesting setup: {e}"))?;
 
@@ -34,21 +35,17 @@ impl Client {
             return Err(anyhow!("{}", resp.body_string().await.unwrap()));
         }
 
-        resp
-            .body_json::<maker::SetupMsg>()
+        resp.body_json::<maker::SetupMsg>()
             .await
             .map_err(|e| anyhow!("error decoding step1 response: {e}"))
     }
 
-    pub async fn lock(&self, target_address: String, amount: f64, msg: taker::LockMsg1) -> anyhow::Result<maker::LockMsg> {
+    pub async fn lock(&self, msg: taker::LockMsg1) -> anyhow::Result<maker::LockMsg> {
         let mut resp = self
             .client
             .post("lock")
-            .body_json(&LockRequest {
-                target_address,
-                amount,
-                msg
-            }).unwrap()
+            .body_json(&msg)
+            .unwrap()
             .await
             .map_err(|e| anyhow!("error requesting setup: {e}"))?;
 
@@ -56,8 +53,7 @@ impl Client {
             return Err(anyhow!("{}", resp.body_string().await.unwrap()));
         }
 
-        resp
-            .body_json::<maker::LockMsg>()
+        resp.body_json::<maker::LockMsg>()
             .await
             .map_err(|e| anyhow!("error decoding lock response: {e}"))
     }
@@ -66,7 +62,8 @@ impl Client {
         let mut resp = self
             .client
             .post("swap")
-            .body_json(&msg).unwrap()
+            .body_json(&msg)
+            .unwrap()
             .await
             .map_err(|e| anyhow!("error requesting setup: {e}"))?;
 
@@ -74,8 +71,7 @@ impl Client {
             return Err(anyhow!("{}", resp.body_string().await.unwrap()));
         }
 
-        resp
-            .body_json::<maker::SwapMsg>()
+        resp.body_json::<maker::SwapMsg>()
             .await
             .map_err(|e| anyhow!("error decoding swap response: {e}"))
     }

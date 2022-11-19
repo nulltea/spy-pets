@@ -4,8 +4,8 @@ use ethers::prelude::*;
 use std::fs;
 use std::path::Path;
 
-use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 use crate::k256::ecdsa::SigningKey;
+use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 
 pub fn keypair_gen() -> (Scalar<Secp256k1>, Point<Secp256k1>) {
     let sk = Scalar::random();
@@ -46,8 +46,8 @@ pub fn write_to_keystore<D: AsRef<Path>, S: AsRef<str>, P: AsRef<[u8]>>(
         password,
         Some(name.as_ref()),
     )
-        .map_err(|e| anyhow!("error encrypting key: {e}"))
-        .map(|_| ())
+    .map_err(|e| anyhow!("error encrypting key: {e}"))
+    .map(|_| ())
 }
 
 pub fn read_from_keystore<P: AsRef<Path>, S: AsRef<[u8]>>(
@@ -55,6 +55,7 @@ pub fn read_from_keystore<P: AsRef<Path>, S: AsRef<[u8]>>(
     password: S,
 ) -> anyhow::Result<LocalWallet> {
     let sk_bytes = eth_keystore::decrypt_key(path, password);
-    let sk = SigningKey::from_bytes(sk_bytes?.as_slice()).map_err(|e| anyhow!("error parsing key: {e}"))?;
+    let sk = SigningKey::from_bytes(sk_bytes?.as_slice())
+        .map_err(|e| anyhow!("error parsing key: {e}"))?;
     Ok(LocalWallet::from(sk))
 }

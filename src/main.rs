@@ -3,34 +3,34 @@ extern crate rocket;
 
 use std::path::Path;
 
+use anyhow::anyhow;
 use std::str::FromStr;
 use std::thread::sleep;
 use std::time::Duration;
-use anyhow::anyhow;
 
 use cli_batteries::version;
 
 use ethers::prelude::*;
 
-
-
 use inquire::{Password, Select, Text};
 use tracing::{info_span, Instrument};
 
 use crate::args::Options;
+use crate::args::*;
 use crate::ethereum::{Ethereum, WEI_IN_ETHER};
 use crate::maker::Maker;
 use crate::taker::Taker;
-use crate::args::*;
-use crate::utils::{keypair_from_bip39, keypair_from_hex, keypair_gen, read_from_keystore, write_to_keystore};
+use crate::utils::{
+    keypair_from_bip39, keypair_from_hex, keypair_gen, read_from_keystore, write_to_keystore,
+};
 
-mod maker;
-mod taker;
-mod ethereum;
-mod utils;
-mod server;
-mod client;
 mod args;
+mod client;
+mod ethereum;
+mod maker;
+mod server;
+mod taker;
+mod utils;
 
 fn main() {
     cli_batteries::run(version!(), app);
@@ -41,7 +41,10 @@ async fn app(opts: Options) -> eyre::Result<()> {
         match command {
             Command::Setup(args) => setup(args).await.map_err(|e| eyre::anyhow!(e))?,
             Command::Provide(args) => provide(args).await.map_err(|e| eyre::anyhow!(e))?,
-            Command::Swap(args) => swap(args).instrument(info_span!("swap")).await.map_err(|e| eyre::anyhow!(e))?,
+            Command::Swap(args) => swap(args)
+                .instrument(info_span!("swap"))
+                .await
+                .map_err(|e| eyre::anyhow!(e))?,
         }
     }
 
@@ -86,8 +89,15 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
 
     let eth_provider = Ethereum::new(&args.network).await?;
 
-    let target_address = Address::from_str(&args.secondary_address).map_err(|e| anyhow!("error parsing target address: {e}"))?;
-    let (alice, to_alice) = Maker::new(eth_provider.clone(), wallet, target_address, args.time_lock_param).unwrap();
+    let target_address = Address::from_str(&args.secondary_address)
+        .map_err(|e| anyhow!("error parsing target address: {e}"))?;
+    let (alice, to_alice) = Maker::new(
+        eth_provider.clone(),
+        wallet,
+        target_address,
+        args.time_lock_param,
+    )
+    .unwrap();
 
     tokio::spawn(async {
         alice.run().await;
@@ -112,35 +122,57 @@ async fn swap(args: SwapArgs) -> anyhow::Result<()> {
 
     let client = client::Client::new(args.relay_address)?;
 
-    let mut bob = Taker::new(eth_provider.clone(), wallet, args.amount, args.time_lock_param);
-    let setup_msg = info_span!("taker::setup1").in_scope(|| bob.setup1())?;
+    let target_address = Address::from_str(&args.target_address)
+        .map_err(|e| anyhow!("error parsing target address: {e}"))?;
+    let mut alice = Taker::new(
+        eth_provider.clone(),
+        wallet,
+        target_address,
+        args.amount,
+        args.time_lock_param,
+    );
+    let setup_msg = info_span!("taker::setup1").in_scope(|| alice.setup1())?;
 
-    let alice_setup_msg = client.setup(setup_msg).await?;
+    let bob_setup_msg = client.setup(args.amount, setup_msg).await?;
 
     info!("setup complete: key share generated, time-locked commitments exchanged.");
 
-    let lock_msg1 = bob.setup2(alice_setup_msg).instrument(info_span!("taker::setup2")).await?;
+    let lock_msg1 = alice
+        .setup2(bob_setup_msg)
+        .instrument(info_span!("taker::setup2"))
+        .await?;
 
-    let alice_lock_msg = client.lock(args.target_address.clone(), args.amount, lock_msg1).await?;
+    let bob_lock_msg = client.lock(lock_msg1).await?;
 
-    let lock_msg2 = info_span!("taker::lock").in_scope(|| bob.lock(alice_lock_msg))?;
+    let lock_msg2 = alice
+        .lock(bob_lock_msg)
+        .instrument(info_span!("taker::lock"))
+        .await?;
 
     info!("lock complete: pre-signatures generated.");
 
-    let alice_swap_msg = client.swap(lock_msg2).await?;
-    let _ = bob.complete(alice_swap_msg).instrument(info_span!("taker::swap")).await?;
+    let bob_swap_msg = client.swap(lock_msg2).await?;
+    let _ = alice
+        .complete(bob_swap_msg)
+        .instrument(info_span!("taker::swap"))
+        .await?;
 
     info!("swap complete!");
 
-    let target_address = Address::from_str(&args.target_address).map_err(|e| anyhow!("error parsing target address: {e}"))?;
+    let target_address = Address::from_str(&args.target_address)
+        .map_err(|e| anyhow!("error parsing target address: {e}"))?;
 
     loop {
-        let wei = eth_provider.provider.get_balance(target_address, None).await.unwrap();
+        let wei = eth_provider
+            .provider
+            .get_balance(target_address, None)
+            .await
+            .unwrap();
         let eth = wei.as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
         info!("balance of {} is {} ETH", args.target_address, eth);
         sleep(Duration::from_secs(1));
         if eth == args.amount {
-            break
+            break;
         }
     }
 
