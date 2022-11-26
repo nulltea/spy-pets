@@ -12,13 +12,14 @@ use htlp::{lhp, ToBigUint};
 use serde::{Deserialize, Serialize};
 use two_party_adaptor::party_one;
 use two_party_adaptor::party_two::{keygen, sign, EcKeyPair};
+use crate::builders::ContractCall;
 
 pub const SALT_STRING: &[u8] = &[75, 90, 101, 110];
 
 #[derive(Clone)]
 pub struct Taker {
     amount: f64,
-    target_address: Address,
+    // target_address: Address,
     refund_time_param: u64,
 
     s1: Party2SharedAccountState,
@@ -54,17 +55,22 @@ pub struct LockMsg2 {
     pub refund_vtc: htlp::structures::Puzzle,
 }
 
+pub enum CovertTransaction {
+    Swap(f64, Address),
+    CustomTx(TypedTransaction, H256)
+}
+
 impl Taker {
     pub fn new(
         chain_provider: Ethereum,
         wallet: LocalWallet,
-        target_address: Address,
+        // target_address: Address,
         amount: f64,
         refund_time_param: u64,
     ) -> Self {
         Self {
             amount,
-            target_address,
+            // target_address,
             refund_time_param,
             s1: Default::default(),
             s2: Default::default(),
@@ -124,13 +130,15 @@ impl Taker {
         return Ok(res);
     }
 
-    pub async fn lock(&mut self, msg: crate::maker::LockMsg) -> anyhow::Result<LockMsg2> {
+    pub async fn lock(&mut self, msg: crate::maker::LockMsg, covert_tx: CovertTransaction) -> anyhow::Result<LockMsg2> {
         let _ = self
             .sign_p1_pub_share
             .insert(msg.commitments.public_share.clone());
 
+        // (a) Alice veriﬁes proof π_a.
         // todo: verify VTC
 
+        // If VTC is an HTLP scheme, Alice also starts solving puzzles to unlock C_a received from Bob
         {
             let me = self.clone();
             let pp = msg.vtc_params.clone();
@@ -169,6 +177,7 @@ impl Taker {
             });
         }
 
+        // (b) Alice deposits α coins to S_1
         let local_addr = self.wallet.address();
         let s1 = self
             .chain
@@ -179,15 +188,34 @@ impl Taker {
             .expect("tx to compose");
         let _ = self.chain.send(tx, &self.wallet).await?;
 
+        // and computes hash h_a of the transaction (...)
         let s2 = self
             .chain
             .address_from_pk(self.s2.shared_pk.as_ref().unwrap());
-        let (tx, tx_hash) = self
-            .chain
-            .compose_tx(s2, self.target_address, self.amount)
-            .expect("tx to compose");
+        let (tx, tx_hash) = match covert_tx {
+            CovertTransaction::Swap(amount, address_to) => {
+                self
+                    .chain
+                    .compose_tx(s2, address_to, amount)
+                    .expect("tx to compose")
+            }
+            CovertTransaction::CustomTx(tx, tx_hash) => (tx, tx_hash)
+        };
+
         let _ = self.tx.insert(tx);
 
+        // (c) Alice encloses for time t_b her local key share x^S1_p2 into commitment C_b and proof π_b.
+        let vtc_params = lhp::setup::setup(
+            two_party_adaptor::SECURITY_BITS as u64,
+            self.refund_time_param.to_biguint().unwrap(),
+        );
+        let refund_witness = self.s1.key_share.as_ref().unwrap().secret_share.to_bigint();
+        let refund_vtc = lhp::generate::gen(
+            &vtc_params,
+            htlp::BigUint::from_bytes_be(&*refund_witness.to_bytes()),
+        );
+
+        // (d) Using local shares x^S1_p2 and x^S2_p2 Alice computes `Sign::P2::Msg2` for h_b, h_a respectively
         let pre_sig1 = {
             let party_one::keygen::KeyGenMsg2 { ek, c_key, .. } =
                 self.s1.key_p1_msg1.as_ref().unwrap();
@@ -203,7 +231,7 @@ impl Taker {
                 &self.sign_local.as_ref().unwrap().k3_pair,
                 &msg.tx_hash,
             )
-            .map_err(|e| anyhow!("error in signing round 2: {e}"))
+                .map_err(|e| anyhow!("error in signing round 2: {e}"))
         }?;
 
         let pre_sig2 = {
@@ -221,18 +249,9 @@ impl Taker {
                 &self.sign_local.as_ref().unwrap().k3_pair,
                 &BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..]),
             )
-            .map_err(|e| anyhow!("error in signing round 2: {e}"))
+                .map_err(|e| anyhow!("error in signing round 2: {e}"))
         }?;
 
-        let vtc_params = lhp::setup::setup(
-            two_party_adaptor::SECURITY_BITS as u64,
-            self.refund_time_param.to_biguint().unwrap(),
-        );
-        let refund_witness = self.s1.key_share.as_ref().unwrap().secret_share.to_bigint();
-        let refund_vtc = lhp::generate::gen(
-            &vtc_params,
-            htlp::BigUint::from_bytes_be(&*refund_witness.to_bytes()),
-        );
 
         Ok(LockMsg2 {
             account1: pre_sig1,

@@ -1,46 +1,40 @@
 [package]
-name = "ninja-pets"
+name = "spy-pets"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 anyhow = "1.0.57"
-rand = "0.8.5"
+async-std = { version = "1.10.0", features = ["attributes"] }
+async-trait = "0.1.56"
+backoff = { version = "0.4.0", features = ["tokio"] }
+chrono = "0.4.19"
+clap = { version = "4.0.18", features = ["derive"] }
+cli-batteries = "0.4.0"
+curv-kzen = { version = "0.9", default-features = false }
+eth-keystore = "0.5.0"
+ethers = "1.0.1"
+eyre = "0.6.8"
 futures = "0.3.21"
 futures-util = "0.3"
-async-trait = "0.1.56"
-async-std = { version = "1.10.0", features = ["attributes"] }
-ethers = { version = "0.13.0" }
-eth-keystore = "0.4.1"
-two-party-adaptor = {path = "../two-party-adaptor"}
-curv-kzen = { version = "0.9", default-features = false }
-htlp = { path = "../HTLP"}
+gumdrop = "0.8"
 hex = "0.4"
-
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
-backoff = {version = "0.4.0", features = ["tokio"]}
-
-
+htlp = { git = "https://github.com/timoth-y/HTLP" }
+inquire = { version = "0.2.1" }
+rand = "0.8.5"
+rocket = { version = "0.5.0-rc.2", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-rocket = { version = "0.5.0-rc.2", features = ["json"] }
+strum = { version = "0.24", features = ["derive"] }
 surf = "2.3.2"
-
-eyre = "0.6.8"
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.29"
-cli-batteries = "0.4.0"
-clap = { version = "4.0.18", features = ["derive"] }
-strum = {version = "0.24", features = ["derive"] }
-
-
-
-gumdrop = "0.8"
-inquire = { version = "0.2.1" }
-chrono = "0.4.19"
-
+two-party-adaptor = { path = "../two-party-adaptor" }
 url = "2"
+uniswap-rs = "0.1.0"
 
 [build-dependencies]
 cli-batteries = "0.4"
+
+[patch.crates-io]
+curv-kzen = { git ="https://github.com/ZenGo-X/curv", rev="665cc11d1c56ea8d9d2ead67e3671a084ba4503c" }

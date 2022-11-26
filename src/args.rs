@@ -16,8 +16,10 @@ pub enum Command {
     Setup(SetupArgs),
     #[command(about = "Deploy provider daemon")]
     Provide(ProvideArgs),
-    #[command(about = "Run swap client")]
-    Swap(SwapArgs),
+    #[command(about = "Transfer ETH")]
+    Transfer(TransferArgs),
+    #[command(about = "Swap ETH on Uniswap DEX")]
+    Uniswap(UniswapArgs)
 }
 
 #[derive(Clone, Args)]
@@ -71,7 +73,7 @@ pub struct ProvideArgs {
 }
 
 #[derive(Clone, Args)]
-pub struct SwapArgs {
+pub struct TransferArgs {
     #[clap(
         short,
         long,
@@ -105,6 +107,16 @@ pub struct SwapArgs {
 
     #[clap(index = 1, help = "target address (to)")]
     pub target_address: String,
+}
+
+
+#[derive(Clone, Args)]
+pub struct UniswapArgs {
+    #[clap(flatten)]
+    pub base_opts: TransferArgs,
+
+    #[clap(index = 2, default_value = "USDC", help = "target ERC20")]
+    pub target_erc20: String,
 }
 
 #[derive(Clone, Debug, PartialEq, EnumString)]

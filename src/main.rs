@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::anyhow;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -14,12 +15,13 @@ use ethers::prelude::*;
 
 use inquire::{Password, Select, Text};
 use tracing::{info_span, Instrument};
+use uniswap_rs::Dex;
 
 use crate::args::Options;
 use crate::args::*;
 use crate::ethereum::{Ethereum, WEI_IN_ETHER};
 use crate::maker::Maker;
-use crate::taker::Taker;
+use crate::taker::{CovertTransaction, Taker};
 use crate::utils::{
     keypair_from_bip39, keypair_from_hex, keypair_gen, read_from_keystore, write_to_keystore,
 };
@@ -41,8 +43,12 @@ async fn app(opts: Options) -> eyre::Result<()> {
         match command {
             Command::Setup(args) => setup(args).await.map_err(|e| eyre::anyhow!(e))?,
             Command::Provide(args) => provide(args).await.map_err(|e| eyre::anyhow!(e))?,
-            Command::Swap(args) => swap(args)
-                .instrument(info_span!("swap"))
+            Command::Transfer(args) => transafer(args)
+                .instrument(info_span!("transfer"))
+                .await
+                .map_err(|e| eyre::anyhow!(e))?,
+            Command::Uniswap(args) => uniswap(args)
+                .instrument(info_span!("uniswap"))
                 .await
                 .map_err(|e| eyre::anyhow!(e))?,
         }
@@ -108,7 +114,7 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn swap(args: SwapArgs) -> anyhow::Result<()> {
+async fn transafer(args: TransferArgs) -> anyhow::Result<()> {
     let name = args
         .wallet_name
         .unwrap_or_else(|| Text::new("Wallet name:").prompt().unwrap());
@@ -127,7 +133,6 @@ async fn swap(args: SwapArgs) -> anyhow::Result<()> {
     let mut alice = Taker::new(
         eth_provider.clone(),
         wallet,
-        target_address,
         args.amount,
         args.time_lock_param,
     );
@@ -145,7 +150,7 @@ async fn swap(args: SwapArgs) -> anyhow::Result<()> {
     let bob_lock_msg = client.lock(lock_msg1).await?;
 
     let lock_msg2 = alice
-        .lock(bob_lock_msg)
+        .lock(bob_lock_msg, CovertTransaction::Swap(args.amount, target_address))
         .instrument(info_span!("taker::lock"))
         .await?;
 
@@ -172,6 +177,101 @@ async fn swap(args: SwapArgs) -> anyhow::Result<()> {
         info!("balance of {} is {} ETH", args.target_address, eth);
         sleep(Duration::from_secs(1));
         if eth == args.amount {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+async fn uniswap(args: UniswapArgs) -> anyhow::Result<()> {
+    let name = args
+        .base_opts
+        .wallet_name
+        .unwrap_or_else(|| Text::new("Wallet name:").prompt().unwrap());
+    let password = args
+        .base_opts
+        .password
+        .unwrap_or_else(|| Password::new("Password:").prompt().unwrap());
+    let keystore = Path::new(&args.base_opts.keystore_dir).join(name);
+    let wallet = read_from_keystore(keystore, password)?;
+
+    let eth_provider = Ethereum::new(&args.base_opts.network).await?;
+
+    let client = client::Client::new(args.base_opts.relay_address)?;
+
+    let mut dex = {
+        let client = Arc::new({
+            SignerMiddleware::new(eth_provider.provider.clone(), wallet.clone())
+        });
+
+        Dex::new_with_chain(client, Chain::Goerli, uniswap_rs::ProtocolType::UniswapV2)
+    };
+
+    let target_address = Address::from_str(&args.base_opts.target_address)
+        .map_err(|e| anyhow!("error parsing target address: {e}"))?;
+    let mut alice = Taker::new(
+        eth_provider.clone(),
+        wallet,
+        args.base_opts.amount,
+        args.base_opts.time_lock_param,
+    );
+    let setup_msg = info_span!("taker::setup1").in_scope(|| alice.setup1())?;
+
+    let bob_setup_msg = client.setup(args.base_opts.amount, setup_msg).await?;
+
+    info!("setup complete: key share generated, time-locked commitments exchanged.");
+
+    let lock_msg1 = alice
+        .setup2(bob_setup_msg)
+        .instrument(info_span!("taker::setup2"))
+        .await?;
+
+    let bob_lock_msg = client.lock(lock_msg1).await?;
+
+    // get contract addresses from address book
+    let usdc = uniswap_rs::contracts::address(args.target_erc20, Chain::Goerli);
+    // swap amount
+    let raw_amount = U256::exp10(3);
+    let amount = uniswap_rs::Amount::ExactIn(raw_amount);
+    println!("Amount: {:?} ETH", ethers::utils::format_units(raw_amount, 3)?);
+
+    // construct swap path
+    // specify native ETH by using NATIVE_ADDRESS or Address::repeat_byte(0xee)
+    let eth = uniswap_rs::constants::NATIVE_ADDRESS;
+    let path = [eth, usdc];
+
+    // create the swap transaction
+    let swap_call = dex.swap(amount, 0.5, &path, Some(target_address), None).await?;
+
+    let lock_msg2 = alice
+        .lock(bob_lock_msg, CovertTransaction::CustomTx(swap_call.tx.clone(), swap_call.tx.sighash()))
+        .instrument(info_span!("taker::lock"))
+        .await?;
+
+    info!("lock complete: pre-signatures generated.");
+
+    let bob_swap_msg = client.swap(lock_msg2).await?;
+    let _ = alice
+        .complete(bob_swap_msg)
+        .instrument(info_span!("taker::swap"))
+        .await?;
+
+    info!("swap complete!");
+
+    let target_address = Address::from_str(&args.base_opts.target_address)
+        .map_err(|e| anyhow!("error parsing target address: {e}"))?;
+
+    loop {
+        let wei = eth_provider
+            .provider
+            .get_balance(target_address, None)
+            .await
+            .unwrap();
+        let eth = wei.as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
+        info!("balance of {} is {} ETH", args.base_opts.target_address, eth);
+        sleep(Duration::from_secs(1));
+        if eth == args.base_opts.amount {
             break;
         }
     }
