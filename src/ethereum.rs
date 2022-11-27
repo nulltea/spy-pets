@@ -34,6 +34,10 @@ impl Ethereum {
         })
     }
 
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
     pub fn compose_tx(
         &self,
         from: Address,

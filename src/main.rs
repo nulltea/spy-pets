@@ -12,9 +12,11 @@ use std::time::Duration;
 use cli_batteries::version;
 
 use ethers::prelude::*;
+use ethers::utils::format_units;
 
 use inquire::{Password, Select, Text};
 use tracing::{info_span, Instrument};
+use uniswap_rs::bindings::ierc20::ierc20;
 use uniswap_rs::Dex;
 
 use crate::args::Options;
@@ -22,9 +24,7 @@ use crate::args::*;
 use crate::ethereum::{Ethereum, WEI_IN_ETHER};
 use crate::maker::Maker;
 use crate::taker::{CovertTransaction, Taker};
-use crate::utils::{
-    keypair_from_bip39, keypair_from_hex, keypair_gen, read_from_keystore, write_to_keystore,
-};
+use crate::utils::{KeylessWallet, keypair_from_bip39, keypair_from_hex, keypair_gen, read_from_keystore, write_to_keystore};
 
 mod args;
 mod client;
@@ -164,7 +164,7 @@ async fn transfer(args: TransferArgs) -> anyhow::Result<()> {
         .instrument(info_span!("taker::swap"))
         .await?;
 
-    info!("swap complete!");
+    info!("transfer complete!");
 
     let target_address = Address::from_str(&args.target_address)
         .map_err(|e| anyhow!("error parsing target address: {e}"))?;
@@ -186,6 +186,13 @@ async fn transfer(args: TransferArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+abigen!(
+    IErc20,
+    r#"[
+            function balanceOf(address account) external view returns (uint256)
+    ]"#,
+);
+
 async fn uniswap(args: UniswapArgs) -> anyhow::Result<()> {
     let name = args
         .base_opts
@@ -203,19 +210,11 @@ async fn uniswap(args: UniswapArgs) -> anyhow::Result<()> {
 
     let client = client::Client::new(args.base_opts.relay_address)?;
 
-    let mut dex = {
-        let client = Arc::new({
-            SignerMiddleware::new(eth_provider.provider.clone(), wallet.clone())
-        });
-
-        Dex::new_with_chain(client, Chain::Goerli, uniswap_rs::ProtocolType::UniswapV2)
-    };
-
     let target_address = Address::from_str(&args.base_opts.target_address)
         .map_err(|e| anyhow!("error parsing target address: {e}"))?;
     let mut alice = Taker::new(
         eth_provider.clone(),
-        wallet,
+        wallet.clone(),
         args.base_opts.amount,
         args.base_opts.time_lock_param,
     );
@@ -230,14 +229,23 @@ async fn uniswap(args: UniswapArgs) -> anyhow::Result<()> {
         .instrument(info_span!("taker::setup2"))
         .await?;
 
+    info!("CoinSwap Address 2: {}", alice.s2_address());
+
     let bob_lock_msg = client.lock(lock_msg1).await?;
 
+    let mut dex = {
+        let client = Arc::new({
+            SignerMiddleware::new(eth_provider.provider.clone(), KeylessWallet::new(alice.s2_address(), eth_provider.chain_id()))
+        });
+
+        Dex::new_with_chain(client, Chain::Goerli, uniswap_rs::ProtocolType::UniswapV2)
+    };
+
     // get contract addresses from address book
-    let usdc = uniswap_rs::contracts::address(args.target_erc20, Chain::Goerli);
+    let usdc = uniswap_rs::contracts::address(&args.target_erc20, Chain::Goerli);
     // swap amount
     let raw_amount = U256::exp10(3);
     let amount = uniswap_rs::Amount::ExactIn(raw_amount);
-    println!("Amount: {:?} ETH", ethers::utils::format_units(raw_amount, 3)?);
 
     // construct swap path
     // specify native ETH by using NATIVE_ADDRESS or Address::repeat_byte(0xee)
@@ -245,10 +253,12 @@ async fn uniswap(args: UniswapArgs) -> anyhow::Result<()> {
     let path = [eth, usdc];
 
     // create the swap transaction
-    let swap_call = dex.swap(amount, 0.5, &path, Some(target_address), None).await?;
+    let mut swap_call = dex.swap(amount, 0.5, &path, Some(target_address), None).await?;
+    let eip1559_tx = swap_call.tx.as_eip1559_mut().unwrap();
+    let _= eip1559_tx.max_fee_per_gas.insert(8.into());
 
     let lock_msg2 = alice
-        .lock(bob_lock_msg, CovertTransaction::CustomTx(swap_call.tx.clone(), swap_call.tx.sighash()))
+        .lock(bob_lock_msg, CovertTransaction::CustomTx(swap_call.tx))
         .instrument(info_span!("taker::lock"))
         .await?;
 
@@ -258,23 +268,21 @@ async fn uniswap(args: UniswapArgs) -> anyhow::Result<()> {
     let _ = alice
         .complete(bob_swap_msg)
         .instrument(info_span!("taker::swap"))
-        .await?;
+        .await.unwrap();
 
     info!("swap complete!");
 
     let target_address = Address::from_str(&args.base_opts.target_address)
         .map_err(|e| anyhow!("error parsing target address: {e}"))?;
 
+    let erc20 = IErc20::new(usdc, Arc::new(eth_provider.provider));
+
     loop {
-        let wei = eth_provider
-            .provider
-            .get_balance(target_address, None)
-            .await
-            .unwrap();
-        let eth = wei.as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
-        info!("balance of {} is {} ETH", args.base_opts.target_address, eth);
+        let balance = erc20.balance_of(target_address).call().await.unwrap();
+        let tokens: f64 = format_units(balance, 0)?.parse()?;
+        info!("balance of {} is {} {}", args.base_opts.target_address, tokens, args.target_erc20);
         sleep(Duration::from_secs(1));
-        if eth == args.base_opts.amount {
+        if tokens != 0.0 {
             break;
         }
     }

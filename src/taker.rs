@@ -59,7 +59,7 @@ pub struct LockMsg2 {
 
 pub enum CovertTransaction {
     Swap(f64, Address),
-    CustomTx(TypedTransaction, H256)
+    CustomTx(TypedTransaction)
 }
 
 impl Taker {
@@ -183,19 +183,26 @@ impl Taker {
         let s2 = self
             .chain
             .address_from_pk(self.s2.shared_pk.as_ref().unwrap());
-        let (tx, tx_hash) = match covert_tx {
+        let (mut tx, tx_hash, tx_gas) = match covert_tx {
             CovertTransaction::Swap(amount, address_to) => {
                 self
                     .chain
                     .compose_tx(s2, address_to, amount, Some(msg.gas_price))
+                    .map(|r| (r.0, r.1, U256::from(21000)))
                     .expect("tx to compose")
             }
-            CovertTransaction::CustomTx(tx, tx_hash) => (tx, tx_hash)
-        };
+            CovertTransaction::CustomTx(mut tx) => {
+                let tx_gas = self.chain.provider.estimate_gas(&tx, None)
+                    .await
+                    .map_err(|e| anyhow!("fail to estimate gas: {e}"))?;
+                tx
+                    .set_chain_id(self.chain.chain_id())
+                    .set_gas(tx_gas)
+                    .set_gas_price(msg.gas_price);
 
-        let tx_gas = self.chain.provider.estimate_gas(&tx, None)
-            .await
-            .map_err(|e| anyhow!("fail to estimate gas: {e}"))?;
+                (tx.clone(), tx.sighash(), tx_gas)
+            }
+        };
 
         let _ = self.tx.insert(tx);
 
@@ -282,5 +289,11 @@ impl Taker {
         );
 
         self.chain.send_signed(self.tx.take().unwrap(), &sig).await
+    }
+
+    pub fn s2_address(&self) -> Address {
+        self
+            .chain
+            .address_from_pk(self.s2.shared_pk.as_ref().unwrap())
     }
 }
