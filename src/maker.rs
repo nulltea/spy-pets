@@ -79,6 +79,8 @@ pub struct LockMsg {
     pub vtc_params: htlp::structures::Params,
     pub refund_vtc: htlp::structures::Puzzle,
     pub tx_hash: BigInt,
+    pub tx_gas: U256,
+    pub gas_price: U256,
 }
 pub type SwapMsg = EncryptedSignature;
 
@@ -188,8 +190,11 @@ impl Maker {
                         let (commitments, eph_share) = sign::first_message();
                         let _ = session.sign_share.insert(eph_share); // todo: ensure that it's fine to reuse k1 for multiple txns
 
+                        let gas_price = self.chain.provider.get_gas_price().await.unwrap();
+
                         let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
-                        let (tx, tx_hash) = self.chain.compose_tx(s1, self.secondary_address, session.requested_amount).expect("tx to compose");
+                        let (tx, tx_hash) = self.chain.compose_tx(s1, self.secondary_address, session.requested_amount, Some(gas_price)).expect("tx to compose");
+                        let tx_gas = self.chain.provider.estimate_gas(&tx, None).await.unwrap();
                         let _ = session.tx.insert(tx);
 
                         let refund_witness = session.s1.key_share.as_ref().unwrap().secret_share.to_bigint();
@@ -207,6 +212,8 @@ impl Maker {
                             vtc_params,
                             refund_vtc,
                             tx_hash: BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..]),
+                            tx_gas,
+                            gas_price,
                         })).unwrap();
                     }
                     MakerRequest::Swap { remote_addr, msg, resp_tx } => {
@@ -239,7 +246,11 @@ impl Maker {
 
                         let local_addr = self.wallet.address();
                         let s2 = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
-                        let (tx, _) = self.chain.compose_tx_with_fee(local_addr, s2, session.requested_amount).expect("tx to compose");
+                        let (tx, _) = {
+                            let fee = (msg.tx_gas * msg.gas_price).as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
+
+                            self.chain.compose_tx(local_addr, s2, session.requested_amount + fee, Some(msg.gas_price)).expect("tx to compose")
+                        };
                         let _ = self.chain.send(tx, &self.wallet).await;
 
                         let adaptor1 = sign::second_message(
@@ -251,7 +262,6 @@ impl Maker {
                             &msg.account1.k3_pair.public_share,
                             &msg.account1.message
                         );
-                        // let _ = self.swap_adaptor.insert(adaptor1);
 
                         let adaptor2 = sign::second_message(
                             session.s2.key_private.as_ref().unwrap(),
@@ -287,13 +297,15 @@ impl Maker {
                 },
                 puzzle_solution = puzzle_tasks.select_next_some() => {
                     if let Ok((x_p1, addr, amount, dlog)) = puzzle_solution {
+                        let gas_price = self.chain.provider.get_gas_price().await.unwrap();
                         let balance = self.chain.provider.get_balance(addr, None).await.unwrap().as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
                         if balance > amount {
                             let dlog: htlp::BigUint = dlog;
                             let x_p2 = Scalar::from_bigint(&BigInt::from_bytes(&dlog.to_bytes_be()));
                             let full_sk = &x_p1 * &x_p2;
+                            let fee = (U256::from(21000) * gas_price).as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
                             let signer = LocalWallet::from(SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap());
-                            let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), amount).unwrap();
+                            let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), balance-fee, Some(gas_price)).unwrap();
                             self.chain.send(tx, &signer).await.unwrap();
                             warn!("swap failed, funds were refunded to {}", self.wallet.address());
                         }

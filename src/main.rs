@@ -43,7 +43,7 @@ async fn app(opts: Options) -> eyre::Result<()> {
         match command {
             Command::Setup(args) => setup(args).await.map_err(|e| eyre::anyhow!(e))?,
             Command::Provide(args) => provide(args).await.map_err(|e| eyre::anyhow!(e))?,
-            Command::Transfer(args) => transafer(args)
+            Command::Transfer(args) => transfer(args)
                 .instrument(info_span!("transfer"))
                 .await
                 .map_err(|e| eyre::anyhow!(e))?,
@@ -92,6 +92,7 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| Password::new("Password:").prompt().unwrap());
     let keystore = Path::new(&args.keystore_dir).join(name);
     let wallet = read_from_keystore(keystore, password)?;
+    info!("Bob's address: {}", wallet.address());
 
     let eth_provider = Ethereum::new(&args.network).await?;
 
@@ -114,7 +115,7 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn transafer(args: TransferArgs) -> anyhow::Result<()> {
+async fn transfer(args: TransferArgs) -> anyhow::Result<()> {
     let name = args
         .wallet_name
         .unwrap_or_else(|| Text::new("Wallet name:").prompt().unwrap());
@@ -123,6 +124,7 @@ async fn transafer(args: TransferArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| Password::new("Password:").prompt().unwrap());
     let keystore = Path::new(&args.keystore_dir).join(name);
     let wallet = read_from_keystore(keystore, password)?;
+    info!("Alice's address: {}", wallet.address());
 
     let eth_provider = Ethereum::new(&args.network).await?;
 
@@ -195,6 +197,7 @@ async fn uniswap(args: UniswapArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| Password::new("Password:").prompt().unwrap());
     let keystore = Path::new(&args.base_opts.keystore_dir).join(name);
     let wallet = read_from_keystore(keystore, password)?;
+    info!("Alice's address: {}", wallet.address());
 
     let eth_provider = Ethereum::new(&args.base_opts.network).await?;
 

@@ -2,8 +2,6 @@ use clap::{Args, Parser};
 use strum::EnumString;
 use url::Url;
 
-pub const NETWORK_FEE_DELTA: f64 = 0.1;
-
 #[derive(Clone, Parser)]
 pub struct Options {
     #[command(subcommand)]

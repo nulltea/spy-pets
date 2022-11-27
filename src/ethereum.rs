@@ -10,7 +10,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::PublicKey;
 
 use crate::types::transaction::eip2718::TypedTransaction;
-use crate::{Network, NETWORK_FEE_DELTA};
+use crate::Network;
 use futures::StreamExt;
 use tokio::pin;
 
@@ -39,30 +39,26 @@ impl Ethereum {
         from: Address,
         to: Address,
         amount: f64,
+        gas_price: Option<U256>
     ) -> anyhow::Result<(TypedTransaction, H256)> {
         let mut tx = TransactionRequest::new()
             .from(from)
             .to(to)
-            .gas_price(1000000000) // self.provider.get_gas_price().await.unwrap(
             .gas(21000)
             .chain_id(self.chain_id)
-            .value(parse_ether(amount).map_err(|e| anyhow!("error parsing ether: {e}"))?)
-            .into();
+            .value(parse_ether(amount).map_err(|e| anyhow!("error parsing ether: {e}"))?);
+
+        if let Some(gas_price) = gas_price {
+            tx = tx.gas_price(gas_price);
+        }
+
+        let mut tx = tx.into();
 
         self.provider.fill_transaction(&mut tx, None);
 
         let tx_hash = tx.sighash();
 
         Ok((tx, tx_hash))
-    }
-
-    pub fn compose_tx_with_fee(
-        &self,
-        from: Address,
-        to: Address,
-        amount: f64,
-    ) -> anyhow::Result<(TypedTransaction, H256)> {
-        self.compose_tx(from, to, amount + NETWORK_FEE_DELTA)
     }
 
     pub async fn send(&self, tx: TypedTransaction, wallet: &LocalWallet) -> anyhow::Result<H256> {

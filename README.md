@@ -23,4 +23,3 @@ cargo run -- transfer -w alice -m http://127.0.0.1:8000 -t 90F79bf6EB2c4f870365E
 
 ## Known issues
 - Time-locked locked commitments aren't verifiable
-- Poor network fee estimation: +0.1ETH is sent to swap accounts.

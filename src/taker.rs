@@ -53,6 +53,8 @@ pub struct LockMsg2 {
     pub account2: sign::PreSignMsg2,
     pub vtc_params: htlp::structures::Params,
     pub refund_vtc: htlp::structures::Puzzle,
+    pub tx_gas: U256,
+    pub gas_price: U256,
 }
 
 pub enum CovertTransaction {
@@ -163,7 +165,7 @@ impl Taker {
                         );
                         let (tx, _) = me
                             .chain
-                            .compose_tx(addr, me.wallet.address(), me.amount)
+                            .compose_tx(addr, me.wallet.address(), me.amount, Some(msg.gas_price))
                             .unwrap();
                         me.chain.send(tx, &signer).await.unwrap();
                         warn!(
@@ -177,18 +179,7 @@ impl Taker {
             });
         }
 
-        // (b) Alice deposits α coins to S_1
-        let local_addr = self.wallet.address();
-        let s1 = self
-            .chain
-            .address_from_pk(self.s1.shared_pk.as_ref().unwrap());
-        let (tx, _) = self
-            .chain
-            .compose_tx_with_fee(local_addr, s1, self.amount)
-            .expect("tx to compose");
-        let _ = self.chain.send(tx, &self.wallet).await?;
-
-        // and computes hash h_a of the transaction (...)
+        // (b) Alice deposits α coins to S_1 and computes hash h_a of the transaction (...)
         let s2 = self
             .chain
             .address_from_pk(self.s2.shared_pk.as_ref().unwrap());
@@ -196,13 +187,32 @@ impl Taker {
             CovertTransaction::Swap(amount, address_to) => {
                 self
                     .chain
-                    .compose_tx(s2, address_to, amount)
+                    .compose_tx(s2, address_to, amount, Some(msg.gas_price))
                     .expect("tx to compose")
             }
             CovertTransaction::CustomTx(tx, tx_hash) => (tx, tx_hash)
         };
 
+        let tx_gas = self.chain.provider.estimate_gas(&tx, None)
+            .await
+            .map_err(|e| anyhow!("fail to estimate gas: {e}"))?;
+
         let _ = self.tx.insert(tx);
+
+        let (tx, _) = {
+            let fee = (msg.tx_gas * msg.gas_price).as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
+
+            let local_addr = self.wallet.address();
+            let s1 = self
+                .chain
+                .address_from_pk(self.s1.shared_pk.as_ref().unwrap());
+
+            self
+                .chain
+                .compose_tx(local_addr, s1, self.amount + fee, Some(msg.gas_price))
+                .expect("tx to compose")
+        };
+        let _ = self.chain.send(tx, &self.wallet).await?;
 
         // (c) Alice encloses for time t_b her local key share x^S1_p2 into commitment C_b and proof π_b.
         let vtc_params = lhp::setup::setup(
@@ -258,6 +268,8 @@ impl Taker {
             account2: pre_sig2,
             vtc_params,
             refund_vtc,
+            tx_gas,
+            gas_price: msg.gas_price
         })
     }
 
