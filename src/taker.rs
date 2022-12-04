@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, Error};
 
 use crate::ethereum::Ethereum;
 use crate::types::transaction::eip2718::TypedTransaction;
@@ -9,6 +9,7 @@ use curv::BigInt;
 use ethers::prelude::k256::ecdsa::SigningKey;
 use ethers::prelude::*;
 use htlp::{lhp, ToBigUint};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use two_party_adaptor::party_one;
 use two_party_adaptor::party_two::{keygen, sign, EcKeyPair};
@@ -30,7 +31,7 @@ pub struct Taker {
     sign_share: Option<EcKeyPair>,
     adaptor_wit: Scalar<Secp256k1>,
 
-    tx: Option<TypedTransaction>,
+    txns: Vec<TypedTransaction>,
 
     chain: Ethereum,
     wallet: LocalWallet,
@@ -50,7 +51,7 @@ pub type LockMsg1 = sign::PreSignMsg1;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LockMsg2 {
     pub account1: sign::PreSignMsg2,
-    pub account2: sign::PreSignMsg2,
+    pub account2: Vec<sign::PreSignMsg2>,
     pub vtc_params: htlp::structures::Params,
     pub refund_vtc: htlp::structures::Puzzle,
     pub tx_gas: U256,
@@ -59,7 +60,7 @@ pub struct LockMsg2 {
 
 pub enum CovertTransaction {
     Swap(f64, Address),
-    CustomTx(TypedTransaction)
+    CustomTx(Vec<TypedTransaction>)
 }
 
 impl Taker {
@@ -72,17 +73,17 @@ impl Taker {
     ) -> Self {
         Self {
             amount,
-            // target_address,
             refund_time_param,
             s1: Default::default(),
             s2: Default::default(),
-            sign_p1_pub_share: Default::default(),
-            sign_local: Default::default(),
-            sign_share: Default::default(),
+            sign_p1_pub_share: None,
+            sign_local: None,
+            sign_share: None,
             adaptor_wit: Scalar::<Secp256k1>::random(),
-            tx: Default::default(),
+            txns: vec![],
             chain: chain_provider,
             wallet,
+
         }
     }
 
@@ -183,28 +184,42 @@ impl Taker {
         let s2 = self
             .chain
             .address_from_pk(self.s2.shared_pk.as_ref().unwrap());
-        let (mut tx, tx_hash, tx_gas) = match covert_tx {
+        let (txns, tx_hashes, gas_total) = match covert_tx {
             CovertTransaction::Swap(amount, address_to) => {
                 self
                     .chain
                     .compose_tx(s2, address_to, amount, Some(msg.gas_price))
-                    .map(|r| (r.0, r.1, U256::from(21000)))
+                    .map(|r| (vec![r.0], vec![r.1], U256::from(21000)))
                     .expect("tx to compose")
             }
-            CovertTransaction::CustomTx(mut tx) => {
-                let tx_gas = self.chain.provider.estimate_gas(&tx, None)
-                    .await
-                    .map_err(|e| anyhow!("fail to estimate gas: {e}"))?;
-                tx
-                    .set_chain_id(self.chain.chain_id())
-                    .set_gas(tx_gas)
-                    .set_gas_price(msg.gas_price);
+            CovertTransaction::CustomTx(mut txs) => {
+                let mut gas_total = U256::zero();
+                let mut txns = vec![];
+                let mut tx_hashes = vec![];
+                for mut tx in txs {
+                    let tx_gas = match self.chain.provider.estimate_gas(&tx, None)
+                        .await
+                        .map_err(|e| anyhow!("fail to estimate gas: {e}")) {
+                        Ok(gas) => gas,
+                        // it may be impossible to simulate certain transactions (e.g. transfer NFT without having ownership yet)
+                        // todo: fallback mechanism needed
+                        Err(_) => U256::from(110_000)
+                    };
 
-                (tx.clone(), tx.sighash(), tx_gas)
+                    gas_total += tx_gas;
+
+                    tx.set_chain_id(self.chain.chain_id())
+                        .set_gas(tx_gas)
+                        .set_gas_price(msg.gas_price);
+                    tx_hashes.push(tx.sighash());
+                    txns.push(tx);
+                }
+
+                (txns, tx_hashes, gas_total)
             }
         };
 
-        let _ = self.tx.insert(tx);
+        self.txns = txns;
 
         let (tx, _) = {
             let fee = (msg.tx_gas * msg.gas_price).as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
@@ -251,7 +266,7 @@ impl Taker {
                 .map_err(|e| anyhow!("error in signing round 2: {e}"))
         }?;
 
-        let pre_sig2 = {
+        let pre_sigs2 = tx_hashes.into_iter().map(|h| {
             let party_one::keygen::KeyGenMsg2 { ek, c_key, .. } =
                 self.s2.key_p1_msg1.as_ref().unwrap();
 
@@ -264,31 +279,35 @@ impl Taker {
                 &self.sign_local.as_ref().unwrap().k2_pair,
                 &msg.commitments.public_share,
                 &self.sign_local.as_ref().unwrap().k3_pair,
-                &BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..]),
+                &BigInt::from_bytes(&h.to_fixed_bytes()[..]),
             )
                 .map_err(|e| anyhow!("error in signing round 2: {e}"))
-        }?;
-
+        }).collect::<Result<Vec<_>, _>>()?;
 
         Ok(LockMsg2 {
             account1: pre_sig1,
-            account2: pre_sig2,
+            account2: pre_sigs2,
             vtc_params,
             refund_vtc,
-            tx_gas,
+            tx_gas: gas_total,
             gas_price: msg.gas_price
         })
     }
 
-    pub async fn complete(&mut self, swap_adaptor: crate::maker::SwapMsg) -> anyhow::Result<H256> {
-        let sig = sign::decrypt_signature(
-            &swap_adaptor,
+    pub async fn complete(&mut self, swap_adaptors: crate::maker::SwapMsg) -> anyhow::Result<()> {
+        let sigs = swap_adaptors.into_iter().map(|adaptor| sign::decrypt_signature(
+            &adaptor,
             &self.adaptor_wit,
             self.sign_p1_pub_share.as_ref().unwrap(),
             &self.sign_local.as_ref().unwrap().k3_pair,
-        );
+        )).collect_vec();
 
-        self.chain.send_signed(self.tx.take().unwrap(), &sig).await
+        let from = self.s2_address();
+        for (tx, sig) in self.txns.clone().into_iter().zip(sigs) {
+            self.chain.send_signed(from, tx, &sig).await?;
+        }
+
+        Ok(())
     }
 
     pub fn s2_address(&self) -> Address {

@@ -32,6 +32,7 @@ tracing = "0.1.29"
 two-party-adaptor = { path = "../two-party-adaptor" }
 url = "2"
 uniswap-rs = "0.1.0"
+itertools = "0.10.5"
 
 [build-dependencies]
 cli-batteries = "0.4"

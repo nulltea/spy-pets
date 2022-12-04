@@ -1,4 +1,5 @@
 use clap::{Args, Parser};
+use ethers::prelude::*;
 use strum::EnumString;
 use url::Url;
 
@@ -17,7 +18,9 @@ pub enum Command {
     #[command(about = "Transfer ETH")]
     Transfer(TransferArgs),
     #[command(about = "Swap ETH on Uniswap DEX")]
-    Uniswap(UniswapArgs)
+    Uniswap(UniswapArgs),
+    #[command(about = "Buy NFT on Opensea")]
+    BuyNft(BuyNFTArgs)
 }
 
 #[derive(Clone, Args)]
@@ -111,10 +114,23 @@ pub struct TransferArgs {
 #[derive(Clone, Args)]
 pub struct UniswapArgs {
     #[clap(flatten)]
-    pub base_opts: TransferArgs,
+    pub base_args: TransferArgs,
 
     #[clap(index = 2, default_value = "USDC", help = "target ERC20")]
     pub target_erc20: String,
+}
+
+
+#[derive(Clone, Args)]
+pub struct BuyNFTArgs {
+    #[clap(flatten)]
+    pub base_args: TransferArgs,
+
+    #[clap(long, help = "The NFT address you want to buy")]
+    pub nft_contract: Address,
+
+    #[clap(long, help = "The NFT id you want to buy")]
+    pub token_id: U256,
 }
 
 #[derive(Clone, Debug, PartialEq, EnumString)]

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use anyhow::anyhow;
 
 use curv::arithmetic::Converter;
@@ -16,13 +17,13 @@ use tokio::pin;
 
 #[derive(Clone)]
 pub struct Ethereum {
-    pub provider: Provider<Http>,
+    pub provider: Arc<Provider<Http>>,
     chain_id: u64,
 }
 
 impl Ethereum {
     pub async fn new(networks: &Network) -> anyhow::Result<Self> {
-        let provider = Provider::new(Http::new(networks.get_endpoint()));
+        let provider = Arc::new(Provider::new(Http::new(networks.get_endpoint())));
         let chain_id = provider
             .get_chainid()
             .await
@@ -83,10 +84,10 @@ impl Ethereum {
 
     pub async fn send_signed(
         &self,
+        from: Address,
         tx: TypedTransaction,
         sig: &two_party_adaptor::Signature,
     ) -> anyhow::Result<H256> {
-        let from = tx.from().unwrap().clone();
         let m = tx.sighash();
         let r = U256::from_big_endian(&sig.r.to_bytes());
         let s = U256::from_big_endian(&sig.s.to_bytes());
@@ -108,15 +109,19 @@ impl Ethereum {
             .await
             .map_err(|e| anyhow!("error sending raw decrypted transaction: {e}"))?;
 
-        Ok(match pending.await {
-            Ok(Some(rec)) => rec.transaction_hash,
+        match pending.await {
+            Ok(Some(rec)) => match rec.status.map(|e| e.as_u64()) {
+                Some(1) => Ok(rec.transaction_hash),
+                Some(0) => Err(anyhow!("transaction return error code 0")),
+                _ => { panic!("unexpected transaction status"); }
+            },
             Ok(None) => {
                 panic!("expected transaction receipt");
             }
             Err(_e) => {
                 panic!("fatal error sending tx");
             }
-        })
+        }
     }
 
     pub async fn listen_for_signature(

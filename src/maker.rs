@@ -20,6 +20,7 @@ use two_party_adaptor::party_one::{
     keygen, sign, CommWitness, EcKeyPair, EphEcKeyPair, PaillierKeyPair, Party1Private,
 };
 use two_party_adaptor::{party_two, EncryptedSignature};
+use itertools::Itertools;
 
 pub struct Maker {
     secondary_address: Address,
@@ -82,7 +83,7 @@ pub struct LockMsg {
     pub tx_gas: U256,
     pub gas_price: U256,
 }
-pub type SwapMsg = EncryptedSignature;
+pub type SwapMsg = Vec<EncryptedSignature>;
 
 pub enum MakerRequest {
     Setup {
@@ -117,9 +118,9 @@ impl Maker {
                 secondary_address,
                 refund_time_param,
                 from_takers,
-                sessions: Default::default(),
                 chain: chain_provider,
                 wallet,
+                sessions: Default::default(),
             },
             to_maker,
         ))
@@ -224,7 +225,7 @@ impl Maker {
 
                         let prev_commit = session.sign_p2_commit.take().unwrap();
                         sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.account1).expect("expect valid");
-                        sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.account2).expect("expect valid");
+                        msg.account2.iter().map(|m| sign::verify_commitments_and_dlog_proof(&prev_commit, m).expect("expect valid"));
 
                         // todo: verify VTC
 
@@ -263,23 +264,25 @@ impl Maker {
                             &msg.account1.message
                         );
 
-                        let adaptor2 = sign::second_message(
+                        let adaptors2 = msg.account2.iter().map(|m| sign::second_message(
                             session.s2.key_private.as_ref().unwrap(),
                             &session.s2.key_share.as_ref().unwrap().public_share,
-                            &msg.account2.c3,
+                            &m.c3,
                             session.sign_share.as_ref().unwrap(),
-                            &msg.account2.comm_witness.public_share,
-                            &msg.account2.k3_pair.public_share,
-                            &msg.account2.message
-                        );
+                            &m.comm_witness.public_share,
+                            &m.k3_pair.public_share,
+                            &m.message
+                        )).collect_vec();
 
-                        let _ = resp_tx.send(Ok(adaptor2.clone()));
+                        let first_adaptor = adaptors2.first().unwrap().clone();
+
+                        let _ = resp_tx.send(Ok(adaptors2));
 
                         // Complete:
                         let s2 = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
                         let signature = self.chain.listen_for_signature(s2).await.unwrap();
 
-                        let decryption_key = sign::recover_witness(adaptor2, &signature);
+                        let decryption_key = sign::recover_witness(first_adaptor, &signature);
 
                         let signature = party_two::sign::decrypt_signature(
                             &adaptor1, &decryption_key,
@@ -287,7 +290,8 @@ impl Maker {
                             &msg.account1.k3_pair,
                         );
 
-                        self.chain.send_signed(session.tx.take().unwrap(), &signature).await.unwrap();
+                        let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
+                        self.chain.send_signed(s1, session.tx.take().unwrap(), &signature).await.unwrap();
 
                         let wei = self.chain.provider.get_balance(self.secondary_address, None).await.unwrap();
                         let eth = wei / WEI_IN_ETHER;
