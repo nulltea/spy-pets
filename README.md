@@ -1,4 +1,4 @@
-# spy-pets
+# <h1 align="center">SpyPETs</h1>
 This is a prototype of universal covert privacy-enhancing transactions (PETs) inspired by Gregory Maxwell's [CoinSwap](https://gist.github.com/chris-belcher/9144bd57a91c194e332fb5ca371d0964) design and Universal Atomic Swaps [\[TMM'21\]](https://eprint.iacr.org/2021/1612).
 
 ## Usage
@@ -10,17 +10,26 @@ cargo run -- setup
 ```
 
 ### Run market maker daemon
-Alice will be market maker. She runs daemon with configured funded wallet and specifies target address where ETH will be transferred after swap.
+Bob will be market maker. He runs daemon with configured funded wallet and specifies target address where ETH will be transferred after swap.
 ```bash
-cargo run -- provide -w alice -p -t 3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+cargo run -- provide -w bob -p -t 3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 ```
 
-### Run swap client
-Bob will be market taker. He knows the URL of the Alice's daemon and runs client with specified target address where ETH will be transferred after swap and the amount of ETH he wishes to swap.
+### Covert transfer
+Alice will be market taker. She knows the URL of the Bob's daemon and runs client with specified target address where ETH will be transferred after swap and the amount of ETH she wishes to swap.
 ```bash
-cargo run -- swap -w bob -m http://127.0.0.1:8000 -t 90F79bf6EB2c4f870365E785982E1f101E93b906 -a 1.0
+cargo run -- transfer -w alice -r http://127.0.0.1:8000 -a 1.0 90F79bf6EB2c4f870365E785982E1f101E93b906
+```
+
+### Swap ETH <> ERC20 on Uniswap
+```bash
+cargo run -- uniswap -w alice -r http://127.0.0.1:8000 -a 1.0 90F79bf6EB2c4f870365E785982E1f101E93b906 USDC
+```
+
+### Purchase NFT from [ChainSafe Marketplace](https://marketplace.chainsafe.io/)
+```bash
+cargo run -- buy-nft -w alice -r http://127.0.0.1:8000 -a 0.2 --nft-contract 0x2c1867bc3026178a47a677513746dcc6822a137a --token-id 01559ae4021a392a727d4f5619b1689c29b1a951a4e5057f24064001
 ```
 
 ## Known issues
 - Time-locked locked commitments aren't verifiable
-- Poor network fee estimation: +0.1ETH is sent to swap accounts.

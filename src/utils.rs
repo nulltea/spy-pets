@@ -6,6 +6,8 @@ use std::path::Path;
 
 use crate::k256::ecdsa::SigningKey;
 use curv::elliptic::curves::{Point, Scalar, Secp256k1};
+use crate::types::transaction::eip2718::TypedTransaction;
+use crate::types::transaction::eip712::Eip712;
 
 pub fn keypair_gen() -> (Scalar<Secp256k1>, Point<Secp256k1>) {
     let sk = Scalar::random();
@@ -58,4 +60,49 @@ pub fn read_from_keystore<P: AsRef<Path>, S: AsRef<[u8]>>(
     let sk = SigningKey::from_bytes(sk_bytes?.as_slice())
         .map_err(|e| anyhow!("error parsing key: {e}"))?;
     Ok(LocalWallet::from(sk))
+}
+
+#[derive(Debug)]
+pub struct KeylessWallet{
+    address: Address,
+    chain_id: u64,
+}
+
+impl KeylessWallet {
+    pub fn new(address: Address, chain_id: u64) -> Self {
+        Self{
+            address,
+            chain_id
+        }
+    }
+}
+
+#[async_trait]
+impl Signer for KeylessWallet {
+    type Error = WalletError;
+
+    async fn sign_message<S: Send + Sync + AsRef<[u8]>>(&self, message: S) -> Result<Signature, Self::Error> {
+        todo!()
+    }
+
+    async fn sign_transaction(&self, message: &TypedTransaction) -> Result<Signature, Self::Error> {
+        todo!()
+    }
+
+    async fn sign_typed_data<T: Eip712 + Send + Sync>(&self, payload: &T) -> Result<Signature, Self::Error> {
+        todo!()
+    }
+
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    fn with_chain_id<T: Into<u64>>(mut self, chain_id: T) -> Self {
+        self.chain_id = chain_id.into();
+        self
+    }
 }

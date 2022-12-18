@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use anyhow::anyhow;
 
 use curv::arithmetic::Converter;
@@ -10,19 +11,19 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::PublicKey;
 
 use crate::types::transaction::eip2718::TypedTransaction;
-use crate::{Network, NETWORK_FEE_DELTA};
+use crate::Network;
 use futures::StreamExt;
 use tokio::pin;
 
 #[derive(Clone)]
 pub struct Ethereum {
-    pub provider: Provider<Http>,
+    pub provider: Arc<Provider<Http>>,
     chain_id: u64,
 }
 
 impl Ethereum {
     pub async fn new(networks: &Network) -> anyhow::Result<Self> {
-        let provider = Provider::new(Http::new(networks.get_endpoint()));
+        let provider = Arc::new(Provider::new(Http::new(networks.get_endpoint())));
         let chain_id = provider
             .get_chainid()
             .await
@@ -34,35 +35,35 @@ impl Ethereum {
         })
     }
 
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
     pub fn compose_tx(
         &self,
         from: Address,
         to: Address,
         amount: f64,
+        gas_price: Option<U256>
     ) -> anyhow::Result<(TypedTransaction, H256)> {
         let mut tx = TransactionRequest::new()
             .from(from)
             .to(to)
-            .gas_price(1000000000) // self.provider.get_gas_price().await.unwrap(
             .gas(21000)
             .chain_id(self.chain_id)
-            .value(parse_ether(amount).map_err(|e| anyhow!("error parsing ether: {e}"))?)
-            .into();
+            .value(parse_ether(amount).map_err(|e| anyhow!("error parsing ether: {e}"))?);
+
+        if let Some(gas_price) = gas_price {
+            tx = tx.gas_price(gas_price);
+        }
+
+        let mut tx = tx.into();
 
         self.provider.fill_transaction(&mut tx, None);
 
         let tx_hash = tx.sighash();
 
         Ok((tx, tx_hash))
-    }
-
-    pub fn compose_tx_with_fee(
-        &self,
-        from: Address,
-        to: Address,
-        amount: f64,
-    ) -> anyhow::Result<(TypedTransaction, H256)> {
-        self.compose_tx(from, to, amount + NETWORK_FEE_DELTA)
     }
 
     pub async fn send(&self, tx: TypedTransaction, wallet: &LocalWallet) -> anyhow::Result<H256> {
@@ -83,10 +84,10 @@ impl Ethereum {
 
     pub async fn send_signed(
         &self,
+        from: Address,
         tx: TypedTransaction,
         sig: &two_party_adaptor::Signature,
     ) -> anyhow::Result<H256> {
-        let from = tx.from().unwrap().clone();
         let m = tx.sighash();
         let r = U256::from_big_endian(&sig.r.to_bytes());
         let s = U256::from_big_endian(&sig.s.to_bytes());
@@ -108,15 +109,19 @@ impl Ethereum {
             .await
             .map_err(|e| anyhow!("error sending raw decrypted transaction: {e}"))?;
 
-        Ok(match pending.await {
-            Ok(Some(rec)) => rec.transaction_hash,
+        match pending.await {
+            Ok(Some(rec)) => match rec.status.map(|e| e.as_u64()) {
+                Some(1) => Ok(rec.transaction_hash),
+                Some(0) => Err(anyhow!("transaction return error code 0")),
+                _ => { panic!("unexpected transaction status"); }
+            },
             Ok(None) => {
                 panic!("expected transaction receipt");
             }
             Err(_e) => {
                 panic!("fatal error sending tx");
             }
-        })
+        }
     }
 
     pub async fn listen_for_signature(

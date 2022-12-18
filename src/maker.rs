@@ -20,6 +20,7 @@ use two_party_adaptor::party_one::{
     keygen, sign, CommWitness, EcKeyPair, EphEcKeyPair, PaillierKeyPair, Party1Private,
 };
 use two_party_adaptor::{party_two, EncryptedSignature};
+use itertools::Itertools;
 
 pub struct Maker {
     secondary_address: Address,
@@ -79,8 +80,10 @@ pub struct LockMsg {
     pub vtc_params: htlp::structures::Params,
     pub refund_vtc: htlp::structures::Puzzle,
     pub tx_hash: BigInt,
+    pub tx_gas: U256,
+    pub gas_price: U256,
 }
-pub type SwapMsg = EncryptedSignature;
+pub type SwapMsg = Vec<EncryptedSignature>;
 
 pub enum MakerRequest {
     Setup {
@@ -115,9 +118,9 @@ impl Maker {
                 secondary_address,
                 refund_time_param,
                 from_takers,
-                sessions: Default::default(),
                 chain: chain_provider,
                 wallet,
+                sessions: Default::default(),
             },
             to_maker,
         ))
@@ -188,8 +191,11 @@ impl Maker {
                         let (commitments, eph_share) = sign::first_message();
                         let _ = session.sign_share.insert(eph_share); // todo: ensure that it's fine to reuse k1 for multiple txns
 
+                        let gas_price = self.chain.provider.get_gas_price().await.unwrap();
+
                         let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
-                        let (tx, tx_hash) = self.chain.compose_tx(s1, self.secondary_address, session.requested_amount).expect("tx to compose");
+                        let (tx, tx_hash) = self.chain.compose_tx(s1, self.secondary_address, session.requested_amount, Some(gas_price)).expect("tx to compose");
+                        let tx_gas = self.chain.provider.estimate_gas(&tx, None).await.unwrap();
                         let _ = session.tx.insert(tx);
 
                         let refund_witness = session.s1.key_share.as_ref().unwrap().secret_share.to_bigint();
@@ -207,6 +213,8 @@ impl Maker {
                             vtc_params,
                             refund_vtc,
                             tx_hash: BigInt::from_bytes(&tx_hash.to_fixed_bytes()[..]),
+                            tx_gas,
+                            gas_price,
                         })).unwrap();
                     }
                     MakerRequest::Swap { remote_addr, msg, resp_tx } => {
@@ -217,7 +225,7 @@ impl Maker {
 
                         let prev_commit = session.sign_p2_commit.take().unwrap();
                         sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.account1).expect("expect valid");
-                        sign::verify_commitments_and_dlog_proof(&prev_commit, &msg.account2).expect("expect valid");
+                        msg.account2.iter().map(|m| sign::verify_commitments_and_dlog_proof(&prev_commit, m).expect("expect valid"));
 
                         // todo: verify VTC
 
@@ -239,7 +247,11 @@ impl Maker {
 
                         let local_addr = self.wallet.address();
                         let s2 = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
-                        let (tx, _) = self.chain.compose_tx_with_fee(local_addr, s2, session.requested_amount).expect("tx to compose");
+                        let (tx, _) = {
+                            let fee = (msg.tx_gas * msg.gas_price).as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
+
+                            self.chain.compose_tx(local_addr, s2, session.requested_amount + fee, Some(msg.gas_price)).expect("tx to compose")
+                        };
                         let _ = self.chain.send(tx, &self.wallet).await;
 
                         let adaptor1 = sign::second_message(
@@ -251,25 +263,26 @@ impl Maker {
                             &msg.account1.k3_pair.public_share,
                             &msg.account1.message
                         );
-                        // let _ = self.swap_adaptor.insert(adaptor1);
 
-                        let adaptor2 = sign::second_message(
+                        let adaptors2 = msg.account2.iter().map(|m| sign::second_message(
                             session.s2.key_private.as_ref().unwrap(),
                             &session.s2.key_share.as_ref().unwrap().public_share,
-                            &msg.account2.c3,
+                            &m.c3,
                             session.sign_share.as_ref().unwrap(),
-                            &msg.account2.comm_witness.public_share,
-                            &msg.account2.k3_pair.public_share,
-                            &msg.account2.message
-                        );
+                            &m.comm_witness.public_share,
+                            &m.k3_pair.public_share,
+                            &m.message
+                        )).collect_vec();
 
-                        let _ = resp_tx.send(Ok(adaptor2.clone()));
+                        let first_adaptor = adaptors2.first().unwrap().clone();
+
+                        let _ = resp_tx.send(Ok(adaptors2));
 
                         // Complete:
                         let s2 = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
                         let signature = self.chain.listen_for_signature(s2).await.unwrap();
 
-                        let decryption_key = sign::recover_witness(adaptor2, &signature);
+                        let decryption_key = sign::recover_witness(first_adaptor, &signature);
 
                         let signature = party_two::sign::decrypt_signature(
                             &adaptor1, &decryption_key,
@@ -277,7 +290,8 @@ impl Maker {
                             &msg.account1.k3_pair,
                         );
 
-                        self.chain.send_signed(session.tx.take().unwrap(), &signature).await.unwrap();
+                        let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
+                        self.chain.send_signed(s1, session.tx.take().unwrap(), &signature).await.unwrap();
 
                         let wei = self.chain.provider.get_balance(self.secondary_address, None).await.unwrap();
                         let eth = wei / WEI_IN_ETHER;
@@ -287,13 +301,15 @@ impl Maker {
                 },
                 puzzle_solution = puzzle_tasks.select_next_some() => {
                     if let Ok((x_p1, addr, amount, dlog)) = puzzle_solution {
+                        let gas_price = self.chain.provider.get_gas_price().await.unwrap();
                         let balance = self.chain.provider.get_balance(addr, None).await.unwrap().as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
                         if balance > amount {
                             let dlog: htlp::BigUint = dlog;
                             let x_p2 = Scalar::from_bigint(&BigInt::from_bytes(&dlog.to_bytes_be()));
                             let full_sk = &x_p1 * &x_p2;
+                            let fee = (U256::from(21000) * gas_price).as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
                             let signer = LocalWallet::from(SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap());
-                            let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), amount).unwrap();
+                            let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), balance-fee, Some(gas_price)).unwrap();
                             self.chain.send(tx, &signer).await.unwrap();
                             warn!("swap failed, funds were refunded to {}", self.wallet.address());
                         }
