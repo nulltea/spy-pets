@@ -131,11 +131,13 @@ impl<TL: TimeLock> Maker<TL> {
     }
 
     pub async fn run(mut self) {
-        let mut puzzle_tasks = FuturesUnordered::new();
+        let mut vtc_tasks = FuturesUnordered::new();
+        let mut swap_completions = FuturesUnordered::new();
+
         let mut service_messages = self.from_takers.fuse();
 
         loop {
-            tokio::select! {
+            select! {
                 msg = service_messages.select_next_some() => match msg {
                     MakerRequest::Setup { remote_addr, amount, msg, resp_tx } => {
                         let session: &mut SessionState = match self.sessions.entry(remote_addr) {
@@ -207,7 +209,7 @@ impl<TL: TimeLock> Maker<TL> {
 
                         // (b) Bob encloses for time ta his local key share x^S1_p1 into commitment C_a and proof π_a according to VTC scheme.
                         let refund_vtc = self.time_lock.lock(
-                            &session.s1.key_share.as_ref().unwrap().secret_share,
+                            &session.s1.key_share.as_ref().unwrap().secret_share.to_bigint(),
                             &self.refund_after,
                         );
 
@@ -225,7 +227,7 @@ impl<TL: TimeLock> Maker<TL> {
                         })).unwrap();
                     }
                     MakerRequest::Swap { remote_addr, msg, resp_tx } => {
-                        let session = match self.sessions.get_mut(&remote_addr) {
+                        let mut session = match self.sessions.remove(&remote_addr) {
                             Some(e) => e,
                             None => panic!("unexpected message order")
                         };
@@ -240,8 +242,8 @@ impl<TL: TimeLock> Maker<TL> {
 
                         // (a) Bob veriﬁes dlog proofs
                         let prev_commit = session.sign_p2_commit.take().unwrap();
-                        sign::verify_commitments_and_dlog_proof(&prev_commit, &s1).expect("expect valid");
-                        s2.iter().map(|m| sign::verify_commitments_and_dlog_proof(&prev_commit, m).expect("expect valid"));
+                        sign::verify_commitments_and_dlog_proof(&prev_commit, &s1.comm_witness).expect("expect valid");
+                        s2.iter().map(|m| sign::verify_commitments_and_dlog_proof(&prev_commit, &m.comm_witness).expect("expect valid"));
 
                         // (b) Bob veriﬁes proof π_b;
                         assert!(refund_vtc.verify(
@@ -254,12 +256,12 @@ impl<TL: TimeLock> Maker<TL> {
                             let amount = session.requested_amount;
                             let x_p1 = session.s2.key_share.as_ref().unwrap().secret_share.clone();
                             let addr = self.chain.address_from_pk(session.s2.shared_pk.as_ref().unwrap());
-                            puzzle_tasks.push(tokio::task::spawn(async move {
+                            vtc_tasks.push(tokio::task::spawn(async move {
                                 (
                                     x_p1,
                                     addr,
                                     amount,
-                                    refund_vtc.unlock().await.unwrap(),
+                                    Scalar::from_bigint(&refund_vtc.unlock().await.unwrap()),
                                 )
                             }));
                         }
@@ -275,15 +277,6 @@ impl<TL: TimeLock> Maker<TL> {
                         let _ = self.chain.send(tx, &self.wallet).await;
 
                         // Using local shares x^S1_b and x^S2_b he computes σ′_b,σ′_a (pre-signatures) for h_b,h_a respectively:
-                        let adaptor1 = sign::second_message(
-                            session.s1.key_private.as_ref().unwrap(),
-                            &session.s1.key_share.as_ref().unwrap().public_share,
-                            &s1.c3,
-                            session.sign_share.as_ref().unwrap(),
-                            &s1.comm_witness.public_share,
-                            &s1.k3_pair.public_share,
-                            &s1.message
-                        );
                         let adaptors2 = s2.iter().map(|m| sign::second_message(
                             session.s2.key_private.as_ref().unwrap(),
                             &session.s2.key_share.as_ref().unwrap().public_share,
@@ -306,26 +299,35 @@ impl<TL: TimeLock> Maker<TL> {
                         // decrypts σ′_b using key y to get a valid signature σ_b,
                         let decryption_key = sign::recover_witness(first_adaptor, &signature);
 
-                        let signature = party_two::sign::decrypt_signature(
-                            &adaptor1, &decryption_key,
-                            &session.sign_share.as_ref().unwrap().public_share,
-                            &s1.k3_pair,
-                        );
-
                         // which he then broadcasts on-chain along with the transaction that transfers α coins from S1 to Db.
-                        let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
-                        self.chain.send_signed(s1, session.tx.take().unwrap(), &signature).await.unwrap();
+                        swap_completions.push(tokio::task::spawn(async move {
+                            let c3 = match s1.c3.clone() {
+                                crate::taker::OptionalDelay::Plain(c3) => c3,
+                                crate::taker::OptionalDelay::Delayed(vtc) => vtc.unlock().await.unwrap(),
+                            };
 
-                        let wei = self.chain.provider.get_balance(self.secondary_address, None).await.unwrap();
-                        let eth = wei / WEI_IN_ETHER;
-                        info!("balance of {} is {} ETH", self.secondary_address, eth.as_u64());
+                            (
+                                sign::second_message(
+                                    session.s1.key_private.as_ref().unwrap(),
+                                    &session.s1.key_share.as_ref().unwrap().public_share,
+                                    &c3,
+                                    session.sign_share.as_ref().unwrap(),
+                                    &s1.comm_witness.public_share,
+                                    &s1.k3_pair.public_share,
+                                    &s1.message
+                                ),
+                                decryption_key,
+                                session,
+                                s1,
+                            )
+                        }));
                     }
                     _ => {}
                 },
-                puzzle_solution = puzzle_tasks.select_next_some() => {
+                vtc_openning = vtc_tasks.select_next_some() => {
                     // Refund path:
                     // (a) After time t_b Bob opens timed commitment C_b and acquires Alice’s key share x^S2_p2
-                    if let Ok((x_p1, addr, amount, x_p2)) = puzzle_solution {
+                    if let Ok((x_p1, addr, amount, x_p2)) = vtc_openning {
                         let gas_price = self.chain.provider.get_gas_price().await.unwrap();
                         let balance = self.chain.provider.get_balance(addr, None).await.unwrap().as_u64() as f64 / WEI_IN_ETHER.as_u64() as f64;
                         if balance > amount {
@@ -337,9 +339,25 @@ impl<TL: TimeLock> Maker<TL> {
                             let (tx, _) = self.chain.compose_tx(addr, self.wallet.address(), balance-fee, Some(gas_price)).unwrap();
                             self.chain.send(tx, &signer).await.unwrap();
                             warn!("swap failed, funds were refunded to {}", self.wallet.address());
+                        } else {
+                            info!("timeout passed, all good.");
                         }
-                    } else {
-                        println!("timeout passed, all good.");
+                    }
+                }
+                res = swap_completions.select_next_some() =>  {
+                    if let Ok((adaptor1, decryption_key, mut session, s1)) = res {
+                        let signature = party_two::sign::decrypt_signature(
+                            &adaptor1, &decryption_key,
+                            &session.sign_share.as_ref().unwrap().public_share,
+                            &s1.k3_pair,
+                        );
+
+                        let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
+                        self.chain.send_signed(s1, session.tx.take().unwrap(), &signature).await.unwrap();
+
+                        let wei = self.chain.provider.get_balance(self.secondary_address, None).await.unwrap();
+                        let eth = wei / WEI_IN_ETHER;
+                        info!("balance of {} is {} ETH", self.secondary_address, eth.as_u64());
                     }
                 }
             }

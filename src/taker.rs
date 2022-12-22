@@ -50,9 +50,23 @@ pub type SetupMsg = (keygen::KeyGenMsg1, keygen::KeyGenMsg1);
 
 pub type LockMsg1 = sign::PreSignMsg1;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum OptionalDelay{
+    Delayed(vtc::VTC),
+    Plain(BigInt)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PreSignMsg2WithDelay {
+    pub c3: OptionalDelay,
+    pub comm_witness: two_party_adaptor::party_two::DlogCommWitness,
+    pub k3_pair: two_party_adaptor::party_two::EccKeyPair,
+    pub message: BigInt
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LockMsg2 {
-    pub s1: sign::PreSignMsg2,
+    pub s1: PreSignMsg2WithDelay,
     pub s2: Vec<sign::PreSignMsg2>,
     pub refund_vtc: vtc::VTC,
     pub tx_gas: U256,
@@ -175,7 +189,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
 
             if balance > me.amount {
                 // multiples by x^S1_p2 to get valid key x^S1
-                let full_sk = &x_p1 * &me.s1.key_share.as_ref().unwrap().secret_share;
+                let full_sk = &Scalar::from_bigint(&x_p1) * &me.s1.key_share.as_ref().unwrap().secret_share;
                 let signer = LocalWallet::from(
                     SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap(),
                 );
@@ -250,7 +264,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
 
         // (c) Alice encloses for time t_b her local key share x^S1_p2 into commitment C_b and proof π_b.
         let refund_vtc = self.time_lock.lock(
-            &self.s1.key_share.as_ref().unwrap().secret_share,
+            &self.s1.key_share.as_ref().unwrap().secret_share.to_bigint(),
             &self.refund_after
         );
 
@@ -270,6 +284,14 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
                 &self.sign_local.as_ref().unwrap().k3_pair,
                 &tx_hash,
             )
+                .map(|m| PreSignMsg2WithDelay{
+                    c3: request_delay.map_or(OptionalDelay::Plain(m.c3.clone()), |d| {
+                        OptionalDelay::Delayed(self.time_lock.lock(&m.c3, &d))
+                    }),
+                    comm_witness: m.comm_witness,
+                    k3_pair: m.k3_pair,
+                    message: m.message
+                })
                 .map_err(|e| anyhow!("error in signing round 2: {e}"))
         }?;
 
