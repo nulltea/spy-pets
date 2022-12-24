@@ -133,7 +133,7 @@ pub struct UniswapArgs {
     #[clap(flatten)]
     pub base_args: TransferArgs,
 
-    #[clap(index = 2, default_value = "USDC", help = "target ERC20")]
+    #[clap(index = 3, default_value = "USDC", help = "target ERC20")]
     pub target_erc20: String,
 }
 
@@ -143,10 +143,10 @@ pub struct BuyNFTArgs {
     #[clap(flatten)]
     pub base_args: TransferArgs,
 
-    #[clap(long, help = "The NFT address you want to buy")]
+    #[clap(short= 'c', long, help = "The NFT address you want to buy")]
     pub nft_contract: Address,
 
-    #[clap(long, help = "The NFT id you want to buy")]
+    #[clap(short = 'i', long, help = "The NFT id you want to buy")]
     pub token_id: U256,
 }
 

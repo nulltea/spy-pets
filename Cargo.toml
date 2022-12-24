@@ -20,7 +20,6 @@ futures = "0.3.21"
 futures-util = "0.3"
 gumdrop = "0.8"
 hex = "0.4"
-htlp = { git = "https://github.com/timoth-y/HTLP" }
 inquire = { version = "0.2.1" }
 itertools = "0.10.5"
 rand = "0.8.5"
@@ -32,11 +31,11 @@ humantime = "2.1.0"
 surf = "2.3.2"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.29"
-two-party-adaptor = { path = "../two-party-adaptor" }
 uniswap-rs = "0.1.0"
 url = "2"
-tlock = {path = "../tlock-rs/tlock" }
-#tlock = { git = "https://github.com/timoth-y/tlock-rs" }
+two-party-adaptor = { git = "https://github.com/timoth-y/two-party-adaptor" }
+htlp = { git = "https://github.com/timoth-y/HTLP" }
+tlock = { git = "https://github.com/timoth-y/tlock-rs" }
 
 [build-dependencies]
 cli-batteries = "0.4"
