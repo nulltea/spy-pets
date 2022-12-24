@@ -33,7 +33,19 @@ Alice will be market taker. She knows the URL of the Bob's daemon and runs clien
 cargo run -- transfer -w alice -a http://127.0.0.1:8000 90F79bf6EB2c4f870365E785982E1f101E93b906 1.0
 ```
 
-### Swap ETH <> ERC20 on Uniswap
+### Delayed withdrawals
+
+Alice can ask Bob to withdraw after a certain delay using `--withdraw-delay` (`-d`) option.
+This will make time/amount correlation attacks harder, as now Alice's and Bob's withdraw transactions are spread over multiple arbitrary distant blocks.
+
+Alice can enforce this delay by using Verifiable Timed Commitments (VTC) in the last rounds of the SpyPets protocol.
+
+#### Example:
+```bash
+cargo run -- transfer -w alice -a http://127.0.0.1:8000 -d 45s 90F79bf6EB2c4f870365E785982E1f101E93b906 1.0
+```
+
+### Swap ETH/ERC20 on Uniswap
 
 **Usage:** &nbsp; `cargo run -- uniswap [OPTIONS] -w <wallet> -a <relay-address> [TARGET-ADDRESS] [AMOUNT] [ERC20]`
 
