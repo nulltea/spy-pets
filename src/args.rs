@@ -1,3 +1,5 @@
+use std::time::Duration;
+use duration_string::DurationString;
 use clap::{Args, Parser};
 use ethers::prelude::*;
 use strum::EnumString;
@@ -35,6 +37,28 @@ pub struct SetupArgs {
 }
 
 #[derive(Clone, Args)]
+pub struct VTCArgs {
+    #[clap(short = 'v', long = "vtc-method", default_value = "tlock", help = "VTC method ('htlp', 'tlock')")]
+    pub method: VTCMethod,
+
+    #[clap(
+    long,
+    default_value = "18",
+    help = "HTLP hardness parameter"
+    )]
+    pub htlp_hardness: u64,
+
+    #[clap(long, default_value = "https://pl-us.testnet.drand.sh", help = "drand network host url")]
+    pub drand_network: String,
+
+    #[clap(long, default_value = "7672797f548f3f4748ac4bf3352fc6c6b6468c9ad40ad456a397545c6e2df5bf", help = "drand chain hash")]
+    pub chain_hash: String,
+
+    #[clap(short, long, default_value = "360s", help = "lock file for duration (y/w/d/h/m/s/ms)")]
+    pub refund_duration: humantime::Duration,
+}
+
+#[derive(Clone, Args)]
 pub struct ProvideArgs {
     #[clap(
         short,
@@ -56,13 +80,8 @@ pub struct ProvideArgs {
     #[clap(short, long, help = "secondary address (to)")]
     pub secondary_address: String,
 
-    #[clap(
-        short,
-        long,
-        default_value = "18",
-        help = "time parameter of the VTC scheme"
-    )]
-    pub time_lock_param: u64,
+    #[clap(flatten)]
+    pub vtc: VTCArgs,
 
     #[clap(
         short = 'a',
@@ -92,22 +111,20 @@ pub struct TransferArgs {
     #[clap(short, long, default_value = "development", help = "Ethereum network")]
     pub network: Network,
 
-    #[clap(short, long, help = "market maker server address")]
+    #[clap(short = 'a', long, help = "market maker server address")]
     pub relay_address: String,
 
-    #[clap(short, long, help = "transfer amount (ETH)")]
-    pub amount: f64,
+    #[clap(flatten)]
+    pub vtc: VTCArgs,
 
-    #[clap(
-        short,
-        long,
-        default_value = "18",
-        help = "time parameter of the VTC scheme"
-    )]
-    pub time_lock_param: u64,
+    #[clap(short = 'd', long, help = "ask Maker to withdraw after the delay")]
+    pub withdraw_delay: Option<humantime::Duration>,
 
     #[clap(index = 1, help = "target address (to)")]
     pub target_address: String,
+
+    #[clap(index = 2, help = "transfer amount (ETH)")]
+    pub amount: f64,
 }
 
 
@@ -116,7 +133,7 @@ pub struct UniswapArgs {
     #[clap(flatten)]
     pub base_args: TransferArgs,
 
-    #[clap(index = 2, default_value = "USDC", help = "target ERC20")]
+    #[clap(index = 3, default_value = "USDC", help = "target ERC20")]
     pub target_erc20: String,
 }
 
@@ -126,10 +143,10 @@ pub struct BuyNFTArgs {
     #[clap(flatten)]
     pub base_args: TransferArgs,
 
-    #[clap(long, help = "The NFT address you want to buy")]
+    #[clap(short= 'c', long, help = "The NFT address you want to buy")]
     pub nft_contract: Address,
 
-    #[clap(long, help = "The NFT id you want to buy")]
+    #[clap(short = 'i', long, help = "The NFT id you want to buy")]
     pub token_id: U256,
 }
 
@@ -163,4 +180,12 @@ impl Network {
             Network::Development => "31337".to_string(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, EnumString)]
+pub enum VTCMethod {
+    #[strum(serialize = "htlp")]
+    HTLP,
+    #[strum(serialize = "tlock")]
+    TLock
 }

@@ -23,6 +23,7 @@ use inquire::{Password, Select, Text};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{info_span, Instrument};
+use two_party_adaptor::SECURITY_BITS;
 use uniswap_rs::bindings::ierc20::ierc20;
 use uniswap_rs::Dex;
 use url::Url;
@@ -33,6 +34,7 @@ use crate::ethereum::{Ethereum, WEI_IN_ETHER};
 use crate::maker::Maker;
 use crate::taker::{CovertTransaction, Taker};
 use crate::utils::{KeylessWallet, keypair_from_bip39, keypair_from_hex, keypair_gen, read_from_keystore, write_to_keystore};
+use crate::vtc::{VariableVTC};
 
 mod args;
 mod client;
@@ -41,6 +43,7 @@ mod maker;
 mod server;
 mod taker;
 mod utils;
+mod vtc;
 
 fn main() {
     cli_batteries::run(version!(), app);
@@ -49,21 +52,18 @@ fn main() {
 async fn app(opts: Options) -> eyre::Result<()> {
     if let Some(command) = opts.command {
         match command {
-            Command::Setup(args) => setup(args).await.map_err(|e| eyre::anyhow!(e))?,
-            Command::Provide(args) => provide(args).await.map_err(|e| eyre::anyhow!(e))?,
+            Command::Setup(args) => setup(args).await,
+            Command::Provide(args) => provide(args).await,
             Command::Transfer(args) => transfer(args)
                 .instrument(info_span!("transfer"))
-                .await
-                .map_err(|e| eyre::anyhow!(e))?,
+                .await,
             Command::Uniswap(args) => uniswap_swap(args)
                 .instrument(info_span!("uniswap::swap"))
-                .await
-                .map_err(|e| eyre::anyhow!(e))?,
+                .await,
             Command::BuyNft(args) => buy_nft(args)
                 .instrument(info_span!("opensea::buy"))
-                .await
-                .map_err(|e| eyre::anyhow!(e))?,
-        }
+                .await,
+        }.map_err(|e| eyre::anyhow!(e))?
     }
 
     Ok(())
@@ -110,16 +110,23 @@ async fn provide(args: ProvideArgs) -> anyhow::Result<()> {
 
     let target_address = Address::from_str(&args.secondary_address)
         .map_err(|e| anyhow!("error parsing target address: {e}"))?;
-    let (alice, to_alice) = Maker::new(
+
+    let time_lock = match args.vtc.method {
+        VTCMethod::HTLP => VariableVTC::new_htlp(SECURITY_BITS, args.vtc.htlp_hardness),
+        VTCMethod::TLock => VariableVTC::new_tlock(&args.vtc.drand_network, &args.vtc.chain_hash).await?,
+    };
+
+    let (bob, to_alice) = Maker::new(
         eth_provider.clone(),
         wallet,
         target_address,
-        args.time_lock_param,
+        time_lock,
+        args.vtc.refund_duration.into()
     )
     .unwrap();
 
     tokio::spawn(async {
-        alice.run().await;
+        bob.run().await;
     });
 
     server::serve(to_alice, args.server_address).await;
@@ -144,11 +151,16 @@ async fn transfer(args: TransferArgs) -> anyhow::Result<()> {
 
     let target_address = Address::from_str(&args.target_address)
         .map_err(|e| anyhow!("error parsing target address: {e}"))?;
+    let time_lock = match args.vtc.method {
+        VTCMethod::HTLP => VariableVTC::new_htlp(SECURITY_BITS, args.vtc.htlp_hardness),
+        VTCMethod::TLock => VariableVTC::new_tlock(&args.vtc.drand_network, &args.vtc.chain_hash).await?,
+    };
     let mut alice = Taker::new(
         eth_provider.clone(),
         wallet,
         args.amount,
-        args.time_lock_param,
+        time_lock,
+        args.vtc.refund_duration.into()
     );
     let setup_msg = info_span!("taker::setup1").in_scope(|| alice.setup1())?;
 
@@ -164,7 +176,7 @@ async fn transfer(args: TransferArgs) -> anyhow::Result<()> {
     let bob_lock_msg = client.lock(lock_msg1).await?;
 
     let lock_msg2 = alice
-        .lock(bob_lock_msg, CovertTransaction::Swap(args.amount, target_address))
+        .lock(bob_lock_msg, CovertTransaction::Swap(args.amount, target_address), args.withdraw_delay.map(|d| d.into()))
         .instrument(info_span!("taker::lock"))
         .await?;
 
@@ -218,11 +230,16 @@ async fn covert_contract_call<Fut>(
 
     let target_address = Address::from_str(&args.target_address)
         .map_err(|e| anyhow!("error parsing target address: {e}"))?;
+    let time_lock = match args.vtc.method {
+        VTCMethod::HTLP => VariableVTC::new_htlp(SECURITY_BITS, args.vtc.htlp_hardness),
+        VTCMethod::TLock => VariableVTC::new_tlock(&args.vtc.drand_network, &args.vtc.chain_hash).await?,
+    };
     let mut alice = Taker::new(
         eth_provider.clone(),
-        wallet.clone(),
+        wallet,
         args.amount,
-        args.time_lock_param,
+        time_lock,
+        args.vtc.refund_duration.into()
     );
     let setup_msg = info_span!("taker::setup1").in_scope(|| alice.setup1())?;
 
@@ -242,7 +259,7 @@ async fn covert_contract_call<Fut>(
     let tx = compose_tx(alice.s2_address(), target_address).await;
 
     let lock_msg2 = alice
-        .lock(bob_lock_msg, CovertTransaction::CustomTx(tx))
+        .lock(bob_lock_msg, CovertTransaction::CustomTx(tx), args.withdraw_delay.map(|d| d.into()))
         .instrument(info_span!("taker::lock"))
         .await?;
 
