@@ -11,7 +11,7 @@ use tlock::ibe::Ciphertext;
 use tokio::task::JoinError;
 
 pub trait TimeLock {
-    fn lock(&self, w: &BigInt, d: &Duration) -> VTC;
+    fn lock(&self, w: &Scalar<Secp256k1>, d: &Duration) -> VTC;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,14 +37,14 @@ impl HTLP {
 }
 
 impl TimeLock for HTLP {
-    fn lock(&self, w: &BigInt, _d: &Duration) -> VTC {
+    fn lock(&self, w: &Scalar<Secp256k1>, _d: &Duration) -> VTC {
         let pp = lhp::setup::setup(
             self.security_bits,
             self.time_param.to_biguint().unwrap(),
         );
         let c = lhp::generate::gen(
             &pp,
-            BigUint::from_bytes_be(&*w.to_bytes()),
+            BigUint::from_bytes_be(&*w.to_bigint().to_bytes()),
         );
 
         VTC::HTLP(pp, c)
@@ -72,7 +72,7 @@ impl TLock {
 }
 
 impl TimeLock for TLock {
-    fn lock(&self, w: &BigInt, d: &Duration) -> VTC {
+    fn lock(&self, w: &Scalar<Secp256k1>, d: &Duration) -> VTC {
         let round_number = tlock::time::round_after(&self.info, d.clone());
         let message: [u8; 32] = w.to_bytes().to_vec().try_into().unwrap();
         let c = tlock::time_lock(self.info.public_key, round_number, message);
@@ -107,7 +107,7 @@ impl VariableVTC {
 }
 
 impl TimeLock for VariableVTC {
-    fn lock(&self, w: &BigInt, d: &Duration) -> VTC {
+    fn lock(&self, w: &Scalar<Secp256k1>, d: &Duration) -> VTC {
         if let Some(htlp) = self.htlp.as_ref() {
             return htlp.lock(w, d)
         }
@@ -131,20 +131,21 @@ impl VTC {
         }
     }
 
-    pub fn unlock(self) -> impl Future<Output=Result<BigInt, JoinError>> {
+    pub fn unlock(self) -> impl Future<Output=Result<Scalar<Secp256k1>, JoinError>> {
         match self {
             VTC::HTLP(pp, c) => {
                 tokio::task::spawn_blocking(move || {
-                    BigInt::from_bytes(&lhp::solve::solve(&pp, &c).to_bytes_be())
+                    Scalar::from_bigint(&BigInt::from_bytes(&lhp::solve::solve(&pp, &c).to_bytes_be()))
                 })
             },
             VTC::TLock(pp, c) => {
                 tokio::task::spawn(async move {
                     let network = Network::new(pp.network_host, pp.chain_hash).unwrap();
                     let info = network.info().await.unwrap();
-                    tokio::time::sleep(tlock::time::dur_before(&info, pp.round_number)).await;
+                    let dur = tlock::time::dur_before(&info, pp.round_number);
+                    tokio::time::sleep(dur).await;
                     let beacon = network.get(pp.round_number).await.expect("drand beacon is expected");
-                    BigInt::from_bytes(&tlock::time_unlock(beacon, &c))
+                    Scalar::from_bytes(&tlock::time_unlock(beacon, &c)).unwrap()
                 })
             }
         }

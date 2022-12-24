@@ -53,14 +53,17 @@ pub type LockMsg1 = sign::PreSignMsg1;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OptionalDelay{
     Delayed(vtc::VTC),
-    Plain(BigInt)
+    Plain(Scalar<Secp256k1>)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PreSignMsg2WithDelay {
-    pub c3: OptionalDelay,
+    pub c3: BigInt,
     pub comm_witness: two_party_adaptor::party_two::DlogCommWitness,
-    pub k3_pair: two_party_adaptor::party_two::EccKeyPair,
+    pub K3: Point<Secp256k1>,
+    // todo: ensure that it's safe to share k3 scalar (needed for Party 1 (maker) to decrypt adaptor)
+    // in case it isn't we must enforce using VTC that can be opened after Party 2 (us) withdraws
+    pub k3: OptionalDelay,
     pub message: BigInt
 }
 
@@ -189,7 +192,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
 
             if balance > me.amount {
                 // multiples by x^S1_p2 to get valid key x^S1
-                let full_sk = &Scalar::from_bigint(&x_p1) * &me.s1.key_share.as_ref().unwrap().secret_share;
+                let full_sk = &x_p1 * &me.s1.key_share.as_ref().unwrap().secret_share;
                 let signer = LocalWallet::from(
                     SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap(),
                 );
@@ -264,7 +267,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
 
         // (c) Alice encloses for time t_b her local key share x^S1_p2 into commitment C_b and proof π_b.
         let refund_vtc = self.time_lock.lock(
-            &self.s1.key_share.as_ref().unwrap().secret_share.to_bigint(),
+            &self.s1.key_share.as_ref().unwrap().secret_share,
             &self.refund_after
         );
 
@@ -284,13 +287,17 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
                 &self.sign_local.as_ref().unwrap().k3_pair,
                 &tx_hash,
             )
-                .map(|m| PreSignMsg2WithDelay{
-                    c3: request_delay.map_or(OptionalDelay::Plain(m.c3.clone()), |d| {
-                        OptionalDelay::Delayed(self.time_lock.lock(&m.c3, &d))
-                    }),
-                    comm_witness: m.comm_witness,
-                    k3_pair: m.k3_pair,
-                    message: m.message
+                .map(|m| {
+                    let k3 = self.sign_local.as_ref().unwrap().k3_pair.secret_share.clone();
+                    PreSignMsg2WithDelay {
+                        c3: m.c3,
+                        comm_witness: m.comm_witness,
+                        K3: m.K3,
+                        k3: request_delay.map_or(OptionalDelay::Plain(k3.clone()), |d| {
+                            OptionalDelay::Delayed(self.time_lock.lock(&k3, &d))
+                        }),
+                        message: m.message,
+                    }
                 })
                 .map_err(|e| anyhow!("error in signing round 2: {e}"))
         }?;
@@ -328,7 +335,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
             &adaptor,
             &self.adaptor_wit,
             self.sign_p1_pub_share.as_ref().unwrap(),
-            &self.sign_local.as_ref().unwrap().k3_pair,
+            &self.sign_local.as_ref().unwrap().k3_pair.secret_share,
         )).collect_vec();
 
         // which she then broadcasts on-chain along with the transaction, that transfers α coins from S2 to Da.

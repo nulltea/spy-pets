@@ -38,21 +38,20 @@ pub struct SetupArgs {
 
 #[derive(Clone, Args)]
 pub struct VTCArgs {
-    #[clap(short = 'v', long = "vtc-method", help = "VTC method ('htlp', 'tlock')")]
+    #[clap(short = 'v', long = "vtc-method", default_value = "tlock", help = "VTC method ('htlp', 'tlock')")]
     pub method: VTCMethod,
 
     #[clap(
-    short,
     long,
     default_value = "18",
     help = "HTLP hardness parameter"
     )]
     pub htlp_hardness: u64,
 
-    #[clap(short, long, default_value = "https://pl-us.testnet.drand.sh", help = "drand network host url")]
+    #[clap(long, default_value = "https://pl-us.testnet.drand.sh", help = "drand network host url")]
     pub drand_network: String,
 
-    #[clap(short, long, default_value = "7672797f548f3f4748ac4bf3352fc6c6b6468c9ad40ad456a397545c6e2df5bf", help = "drand chain hash")]
+    #[clap(long, default_value = "7672797f548f3f4748ac4bf3352fc6c6b6468c9ad40ad456a397545c6e2df5bf", help = "drand chain hash")]
     pub chain_hash: String,
 
     #[clap(short, long, default_value = "360s", help = "lock file for duration (y/w/d/h/m/s/ms)")]
@@ -112,20 +111,20 @@ pub struct TransferArgs {
     #[clap(short, long, default_value = "development", help = "Ethereum network")]
     pub network: Network,
 
-    #[clap(short, long, help = "market maker server address")]
+    #[clap(short = 'a', long, help = "market maker server address")]
     pub relay_address: String,
-
-    #[clap(short, long, help = "transfer amount (ETH)")]
-    pub amount: f64,
 
     #[clap(flatten)]
     pub vtc: VTCArgs,
 
-    #[clap(short, long, help = "ask Maker to withdraw after the delay")]
+    #[clap(short = 'd', long, help = "ask Maker to withdraw after the delay")]
     pub withdraw_delay: Option<humantime::Duration>,
 
     #[clap(index = 1, help = "target address (to)")]
     pub target_address: String,
+
+    #[clap(index = 2, help = "transfer amount (ETH)")]
+    pub amount: f64,
 }
 
 

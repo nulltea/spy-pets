@@ -209,7 +209,7 @@ impl<TL: TimeLock> Maker<TL> {
 
                         // (b) Bob encloses for time ta his local key share x^S1_p1 into commitment C_a and proof π_a according to VTC scheme.
                         let refund_vtc = self.time_lock.lock(
-                            &session.s1.key_share.as_ref().unwrap().secret_share.to_bigint(),
+                            &session.s1.key_share.as_ref().unwrap().secret_share,
                             &self.refund_after,
                         );
 
@@ -261,7 +261,7 @@ impl<TL: TimeLock> Maker<TL> {
                                     x_p1,
                                     addr,
                                     amount,
-                                    Scalar::from_bigint(&refund_vtc.unlock().await.unwrap()),
+                                    refund_vtc.unlock().await.unwrap(),
                                 )
                             }));
                         }
@@ -283,7 +283,7 @@ impl<TL: TimeLock> Maker<TL> {
                             &m.c3,
                             session.sign_share.as_ref().unwrap(),
                             &m.comm_witness.public_share,
-                            &m.k3_pair.public_share,
+                            &m.K3,
                             &m.message
                         )).collect_vec();
 
@@ -301,24 +301,27 @@ impl<TL: TimeLock> Maker<TL> {
 
                         // which he then broadcasts on-chain along with the transaction that transfers α coins from S1 to Db.
                         swap_completions.push(tokio::task::spawn(async move {
-                            let c3 = match s1.c3.clone() {
-                                crate::taker::OptionalDelay::Plain(c3) => c3,
-                                crate::taker::OptionalDelay::Delayed(vtc) => vtc.unlock().await.unwrap(),
+                            let k3 = match s1.k3.clone() {
+                                crate::taker::OptionalDelay::Plain(k3) => k3,
+                                crate::taker::OptionalDelay::Delayed(vtc) => {
+                                    info!("delaying withdrawal...");
+                                    vtc.unlock().await.unwrap()
+                                },
                             };
 
                             (
                                 sign::second_message(
                                     session.s1.key_private.as_ref().unwrap(),
                                     &session.s1.key_share.as_ref().unwrap().public_share,
-                                    &c3,
+                                    &s1.c3,
                                     session.sign_share.as_ref().unwrap(),
                                     &s1.comm_witness.public_share,
-                                    &s1.k3_pair.public_share,
+                                    &s1.K3,
                                     &s1.message
                                 ),
                                 decryption_key,
                                 session,
-                                s1,
+                                k3,
                             )
                         }));
                     }
@@ -345,11 +348,11 @@ impl<TL: TimeLock> Maker<TL> {
                     }
                 }
                 res = swap_completions.select_next_some() =>  {
-                    if let Ok((adaptor1, decryption_key, mut session, s1)) = res {
+                    if let Ok((adaptor1, decryption_key, mut session, k3)) = res {
                         let signature = party_two::sign::decrypt_signature(
                             &adaptor1, &decryption_key,
                             &session.sign_share.as_ref().unwrap().public_share,
-                            &s1.k3_pair,
+                            &k3,
                         );
 
                         let s1 = self.chain.address_from_pk(session.s1.shared_pk.as_ref().unwrap());
