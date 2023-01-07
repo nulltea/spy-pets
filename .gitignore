@@ -20,4 +20,5 @@ keys/
 
 .DS_Store
 
-paper/
+paper/*.tex
+paper/*.bib
