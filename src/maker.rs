@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use crate::ethereum::Ethereum;
 use crate::types::transaction::eip2718::TypedTransaction;
+use crate::vtc::TimeLock;
 use crate::{vtc, WEI_IN_ETHER};
 use curv::arithmetic::Converter;
-use curv::elliptic::curves::{Point, Scalar, Secp256k1};
+use curv::elliptic::curves::{Point, Secp256k1};
 use curv::BigInt;
 use ethers::prelude::k256::ecdsa::SigningKey;
 use ethers::prelude::*;
@@ -14,15 +15,14 @@ use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{select, FutureExt, SinkExt};
-use htlp::{lhp, ToBigUint};
+
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tracing::log::{info, warn};
 use two_party_adaptor::party_one::{
     keygen, sign, CommWitness, EcKeyPair, EphEcKeyPair, PaillierKeyPair, Party1Private,
 };
 use two_party_adaptor::{party_two, EncryptedSignature};
-use itertools::Itertools;
-use crate::vtc::TimeLock;
 
 pub struct Maker<TL: TimeLock> {
     secondary_address: Address,
@@ -33,7 +33,7 @@ pub struct Maker<TL: TimeLock> {
 
     chain: Ethereum,
     wallet: LocalWallet,
-    time_lock: TL
+    time_lock: TL,
 }
 
 struct SessionState {
@@ -112,7 +112,7 @@ impl<TL: TimeLock> Maker<TL> {
         wallet: LocalWallet,
         secondary_address: Address,
         time_lock: TL,
-        refund_after: Duration
+        refund_after: Duration,
     ) -> anyhow::Result<(Self, mpsc::Sender<MakerRequest>)> {
         let (to_maker, from_takers) = mpsc::channel(1);
 

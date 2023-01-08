@@ -5,9 +5,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::k256::ecdsa::SigningKey;
-use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 use crate::types::transaction::eip2718::TypedTransaction;
 use crate::types::transaction::eip712::Eip712;
+use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 
 pub fn keypair_gen() -> (Scalar<Secp256k1>, Point<Secp256k1>) {
     let sk = Scalar::random();
@@ -63,17 +63,14 @@ pub fn read_from_keystore<P: AsRef<Path>, S: AsRef<[u8]>>(
 }
 
 #[derive(Debug)]
-pub struct KeylessWallet{
+pub struct KeylessWallet {
     address: Address,
     chain_id: u64,
 }
 
 impl KeylessWallet {
     pub fn new(address: Address, chain_id: u64) -> Self {
-        Self{
-            address,
-            chain_id
-        }
+        Self { address, chain_id }
     }
 }
 
@@ -81,15 +78,21 @@ impl KeylessWallet {
 impl Signer for KeylessWallet {
     type Error = WalletError;
 
-    async fn sign_message<S: Send + Sync + AsRef<[u8]>>(&self, message: S) -> Result<Signature, Self::Error> {
+    async fn sign_message<S: Send + Sync + AsRef<[u8]>>(
+        &self,
+        _message: S,
+    ) -> Result<Signature, Self::Error> {
         todo!()
     }
 
-    async fn sign_transaction(&self, message: &TypedTransaction) -> Result<Signature, Self::Error> {
+    async fn sign_transaction(&self, _message: &TypedTransaction) -> Result<Signature, Self::Error> {
         todo!()
     }
 
-    async fn sign_typed_data<T: Eip712 + Send + Sync>(&self, payload: &T) -> Result<Signature, Self::Error> {
+    async fn sign_typed_data<T: Eip712 + Send + Sync>(
+        &self,
+        _payload: &T,
+    ) -> Result<Signature, Self::Error> {
         todo!()
     }
 

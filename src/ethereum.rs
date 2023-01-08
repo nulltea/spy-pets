@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use anyhow::anyhow;
+use std::sync::Arc;
 
 use curv::arithmetic::Converter;
 use curv::elliptic::curves::{Point, Secp256k1};
@@ -44,7 +44,7 @@ impl Ethereum {
         from: Address,
         to: Address,
         amount: f64,
-        gas_price: Option<U256>
+        gas_price: Option<U256>,
     ) -> anyhow::Result<(TypedTransaction, H256)> {
         let mut tx = TransactionRequest::new()
             .from(from)
@@ -113,7 +113,9 @@ impl Ethereum {
             Ok(Some(rec)) => match rec.status.map(|e| e.as_u64()) {
                 Some(1) => Ok(rec.transaction_hash),
                 Some(0) => Err(anyhow!("transaction return error code 0")),
-                _ => { panic!("unexpected transaction status"); }
+                _ => {
+                    panic!("unexpected transaction status");
+                }
             },
             Ok(None) => {
                 panic!("expected transaction receipt");

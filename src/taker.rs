@@ -1,21 +1,21 @@
+use anyhow::{anyhow};
 use std::time::Duration;
-use anyhow::{anyhow, Error};
+
 
 use crate::ethereum::Ethereum;
 use crate::types::transaction::eip2718::TypedTransaction;
+use crate::vtc::TimeLock;
 use crate::{vtc, WEI_IN_ETHER};
 use curv::arithmetic::Converter;
 use curv::elliptic::curves::{Point, Scalar, Secp256k1};
 use curv::BigInt;
 use ethers::prelude::k256::ecdsa::SigningKey;
 use ethers::prelude::*;
-use htlp::{lhp, ToBigUint};
+
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use two_party_adaptor::party_one;
 use two_party_adaptor::party_two::{keygen, sign, EcKeyPair};
-use crate::builders::ContractCall;
-use crate::vtc::TimeLock;
 
 pub const SALT_STRING: &[u8] = &[75, 90, 101, 110];
 
@@ -36,7 +36,7 @@ pub struct Taker<TL: TimeLock + Clone + Send> {
 
     chain: Ethereum,
     wallet: LocalWallet,
-    time_lock: TL
+    time_lock: TL,
 }
 
 #[derive(Clone, Default)]
@@ -51,9 +51,9 @@ pub type SetupMsg = (keygen::KeyGenMsg1, keygen::KeyGenMsg1);
 pub type LockMsg1 = sign::PreSignMsg1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum OptionalDelay{
+pub enum OptionalDelay {
     Delayed(vtc::VTC),
-    Plain(Scalar<Secp256k1>)
+    Plain(Scalar<Secp256k1>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ pub struct PreSignMsg2WithDelay {
     // todo: ensure that it's safe to share k3 scalar (needed for Party 1 (maker) to decrypt adaptor)
     // in case it isn't we must enforce using VTC that can be opened after Party 2 (us) withdraws
     pub k3: OptionalDelay,
-    pub message: BigInt
+    pub message: BigInt,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,7 +78,7 @@ pub struct LockMsg2 {
 
 pub enum CovertTransaction {
     Swap(f64, Address),
-    CustomTx(Vec<TypedTransaction>)
+    CustomTx(Vec<TypedTransaction>),
 }
 
 impl<TL: TimeLock + Clone + Send> Taker<TL> {
@@ -101,7 +101,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
             txns: vec![],
             chain: chain_provider,
             wallet,
-            time_lock
+            time_lock,
         }
     }
 
@@ -131,19 +131,15 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
         {
             keygen::second_message(&msg.s1.0, &msg.s1.1, SALT_STRING)
                 .map_err(|_| anyhow!("verification failed"))?;
-            let shared_pk = keygen::compute_pubkey(
-                self.s1.key_share.as_ref().unwrap(),
-                &msg.s1.0.public_share,
-            );
+            let shared_pk =
+                keygen::compute_pubkey(self.s1.key_share.as_ref().unwrap(), &msg.s1.0.public_share);
             let _ = self.s1.shared_pk.insert(shared_pk);
         };
         {
             keygen::second_message(&msg.s2.0, &msg.s2.1, SALT_STRING)
                 .map_err(|_| anyhow!("verification failed"))?;
-            let shared_pk = keygen::compute_pubkey(
-                self.s2.key_share.as_ref().unwrap(),
-                &msg.s2.0.public_share,
-            );
+            let shared_pk =
+                keygen::compute_pubkey(self.s2.key_share.as_ref().unwrap(), &msg.s2.0.public_share);
             let _ = self.s2.shared_pk.insert(shared_pk);
         };
 
@@ -154,24 +150,32 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
         return Ok(res);
     }
 
-    pub async fn lock(&mut self, msg: crate::maker::LockMsg, covert_tx: CovertTransaction, request_delay: Option<Duration>) -> anyhow::Result<LockMsg2> {
+    pub async fn lock(
+        &mut self,
+        msg: crate::maker::LockMsg,
+        covert_tx: CovertTransaction,
+        request_delay: Option<Duration>,
+    ) -> anyhow::Result<LockMsg2> {
         let _ = self
             .sign_p1_pub_share
             .insert(msg.commitments.public_share.clone());
 
-        let crate::maker::LockMsg{
+        let crate::maker::LockMsg {
             commitments,
             refund_vtc,
             tx_hash,
             tx_gas,
-            gas_price
+            gas_price,
         } = msg;
 
         // (a) Alice veriﬁes proof π_a;
-        assert!(refund_vtc.verify(
-            &self.s1.key_share.as_ref().unwrap().secret_share,
-            self.s1.shared_pk.as_ref().unwrap()
-        ), "invalid refund VTC");
+        assert!(
+            refund_vtc.verify(
+                &self.s1.key_share.as_ref().unwrap().secret_share,
+                self.s1.shared_pk.as_ref().unwrap()
+            ),
+            "invalid refund VTC"
+        );
 
         // Unlocks VTC and handles refund.
         let me = self.clone();
@@ -193,46 +197,49 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
             if balance > me.amount {
                 // multiples by x^S1_p2 to get valid key x^S1
                 let full_sk = &x_p1 * &me.s1.key_share.as_ref().unwrap().secret_share;
-                let signer = LocalWallet::from(
-                    SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap(),
-                );
+                let signer =
+                    LocalWallet::from(SigningKey::from_bytes(&*full_sk.to_bytes()).unwrap());
                 // (b) Having x^S1 , Alice can now sign the transaction to transfer α from S1 to other account of her choice.
                 let (tx, _) = me
                     .chain
                     .compose_tx(addr, me.wallet.address(), me.amount, Some(gas_price))
                     .unwrap();
                 me.chain.send(tx, &signer).await.unwrap();
-                warn!("swap failed, funds were refunded to {}", me.wallet.address());
+                warn!(
+                    "swap failed, funds were refunded to {}",
+                    me.wallet.address()
+                );
             } else {
                 info!("timeout passed, all good.");
             }
         });
-
 
         // (b) Alice deposits α coins to S_1 and computes hash h_a of the transaction (...)
         let s2 = self
             .chain
             .address_from_pk(self.s2.shared_pk.as_ref().unwrap());
         let (txns, tx_hashes, gas_total) = match covert_tx {
-            CovertTransaction::Swap(amount, address_to) => {
-                self
-                    .chain
-                    .compose_tx(s2, address_to, amount, Some(gas_price))
-                    .map(|r| (vec![r.0], vec![r.1], U256::from(21000)))
-                    .expect("tx to compose")
-            }
-            CovertTransaction::CustomTx(mut txs) => {
+            CovertTransaction::Swap(amount, address_to) => self
+                .chain
+                .compose_tx(s2, address_to, amount, Some(gas_price))
+                .map(|r| (vec![r.0], vec![r.1], U256::from(21000)))
+                .expect("tx to compose"),
+            CovertTransaction::CustomTx(txs) => {
                 let mut gas_total = U256::zero();
                 let mut txns = vec![];
                 let mut tx_hashes = vec![];
                 for mut tx in txs {
-                    let tx_gas = match self.chain.provider.estimate_gas(&tx, None)
+                    let tx_gas = match self
+                        .chain
+                        .provider
+                        .estimate_gas(&tx, None)
                         .await
-                        .map_err(|e| anyhow!("fail to estimate gas: {e}")) {
+                        .map_err(|e| anyhow!("fail to estimate gas: {e}"))
+                    {
                         Ok(gas) => gas,
                         // it may be impossible to simulate certain transactions (e.g. transfer NFT without having ownership yet)
                         // todo: fallback mechanism needed
-                        Err(_) => U256::from(110_000)
+                        Err(_) => U256::from(110_000),
                     };
 
                     gas_total += tx_gas;
@@ -258,8 +265,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
                 .chain
                 .address_from_pk(self.s1.shared_pk.as_ref().unwrap());
 
-            self
-                .chain
+            self.chain
                 .compose_tx(local_addr, s1, self.amount + fee, Some(gas_price))
                 .expect("tx to compose")
         };
@@ -268,7 +274,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
         // (c) Alice encloses for time t_b her local key share x^S1_p2 into commitment C_b and proof π_b.
         let refund_vtc = self.time_lock.lock(
             &self.s1.key_share.as_ref().unwrap().secret_share,
-            &self.refund_after
+            &self.refund_after,
         );
 
         // (d) Using local shares x^S1_p2 and x^S2_p2 Alice computes `Sign::P2::Msg2` for h_b, h_a respectively
@@ -287,56 +293,70 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
                 &self.sign_local.as_ref().unwrap().k3_pair,
                 &tx_hash,
             )
-                .map(|m| {
-                    let k3 = self.sign_local.as_ref().unwrap().k3_pair.secret_share.clone();
-                    PreSignMsg2WithDelay {
-                        c3: m.c3,
-                        comm_witness: m.comm_witness,
-                        K3: m.K3,
-                        k3: request_delay.map_or(OptionalDelay::Plain(k3.clone()), |d| {
-                            OptionalDelay::Delayed(self.time_lock.lock(&k3, &d))
-                        }),
-                        message: m.message,
-                    }
-                })
-                .map_err(|e| anyhow!("error in signing round 2: {e}"))
+            .map(|m| {
+                let k3 = self
+                    .sign_local
+                    .as_ref()
+                    .unwrap()
+                    .k3_pair
+                    .secret_share
+                    .clone();
+                PreSignMsg2WithDelay {
+                    c3: m.c3,
+                    comm_witness: m.comm_witness,
+                    K3: m.K3,
+                    k3: request_delay.map_or(OptionalDelay::Plain(k3.clone()), |d| {
+                        OptionalDelay::Delayed(self.time_lock.lock(&k3, &d))
+                    }),
+                    message: m.message,
+                }
+            })
+            .map_err(|e| anyhow!("error in signing round 2: {e}"))
         }?;
 
-        let pre_sigs2 = tx_hashes.into_iter().map(|h| {
-            let party_one::keygen::KeyGenMsg2 { ek, c_key, .. } =
-                self.s2.key_p1_msg1.as_ref().unwrap();
+        let pre_sigs2 = tx_hashes
+            .into_iter()
+            .map(|h| {
+                let party_one::keygen::KeyGenMsg2 { ek, c_key, .. } =
+                    self.s2.key_p1_msg1.as_ref().unwrap();
 
-            sign::second_message(
-                self.sign_local.as_ref().unwrap().k2_commit.clone(),
-                &commitments,
-                ek,
-                c_key,
-                &self.s2.key_share.as_ref().unwrap(),
-                &self.sign_local.as_ref().unwrap().k2_pair,
-                &commitments.public_share,
-                &self.sign_local.as_ref().unwrap().k3_pair,
-                &BigInt::from_bytes(&h.to_fixed_bytes()[..]),
-            )
+                sign::second_message(
+                    self.sign_local.as_ref().unwrap().k2_commit.clone(),
+                    &commitments,
+                    ek,
+                    c_key,
+                    &self.s2.key_share.as_ref().unwrap(),
+                    &self.sign_local.as_ref().unwrap().k2_pair,
+                    &commitments.public_share,
+                    &self.sign_local.as_ref().unwrap().k3_pair,
+                    &BigInt::from_bytes(&h.to_fixed_bytes()[..]),
+                )
                 .map_err(|e| anyhow!("error in signing round 2: {e}"))
-        }).collect::<Result<Vec<_>, _>>()?;
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(LockMsg2 {
             s1: pre_sig1,
             s2: pre_sigs2,
             refund_vtc,
             tx_gas: gas_total,
-            gas_price
+            gas_price,
         })
     }
 
     pub async fn complete(&mut self, swap_adaptors: crate::maker::SwapMsg) -> anyhow::Result<()> {
         // (a) Alice decrypts σ′ a using key y to get a valid signature σ_a,
-        let sigs = swap_adaptors.into_iter().map(|adaptor| sign::decrypt_signature(
-            &adaptor,
-            &self.adaptor_wit,
-            self.sign_p1_pub_share.as_ref().unwrap(),
-            &self.sign_local.as_ref().unwrap().k3_pair.secret_share,
-        )).collect_vec();
+        let sigs = swap_adaptors
+            .into_iter()
+            .map(|adaptor| {
+                sign::decrypt_signature(
+                    &adaptor,
+                    &self.adaptor_wit,
+                    self.sign_p1_pub_share.as_ref().unwrap(),
+                    &self.sign_local.as_ref().unwrap().k3_pair.secret_share,
+                )
+            })
+            .collect_vec();
 
         // which she then broadcasts on-chain along with the transaction, that transfers α coins from S2 to Da.
         let from = self.s2_address();
@@ -348,8 +368,7 @@ impl<TL: TimeLock + Clone + Send> Taker<TL> {
     }
 
     pub fn s2_address(&self) -> Address {
-        self
-            .chain
+        self.chain
             .address_from_pk(self.s2.shared_pk.as_ref().unwrap())
     }
 }

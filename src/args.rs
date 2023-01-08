@@ -1,7 +1,7 @@
-use std::time::Duration;
-use duration_string::DurationString;
 use clap::{Args, Parser};
+
 use ethers::prelude::*;
+
 use strum::EnumString;
 use url::Url;
 
@@ -22,7 +22,7 @@ pub enum Command {
     #[command(about = "Swap ETH on Uniswap DEX")]
     Uniswap(UniswapArgs),
     #[command(about = "Buy NFT on Opensea")]
-    BuyNft(BuyNFTArgs)
+    BuyNft(BuyNFTArgs),
 }
 
 #[derive(Clone, Args)]
@@ -38,23 +38,37 @@ pub struct SetupArgs {
 
 #[derive(Clone, Args)]
 pub struct VTCArgs {
-    #[clap(short = 'v', long = "vtc-method", default_value = "tlock", help = "VTC method ('htlp', 'tlock')")]
+    #[clap(
+        short = 'v',
+        long = "vtc-method",
+        default_value = "tlock",
+        help = "VTC method ('htlp', 'tlock')"
+    )]
     pub method: VTCMethod,
 
-    #[clap(
-    long,
-    default_value = "18",
-    help = "HTLP hardness parameter"
-    )]
+    #[clap(long, default_value = "18", help = "HTLP hardness parameter")]
     pub htlp_hardness: u64,
 
-    #[clap(long, default_value = "https://pl-us.testnet.drand.sh", help = "drand network host url")]
+    #[clap(
+        long,
+        default_value = "https://pl-us.testnet.drand.sh",
+        help = "drand network host url"
+    )]
     pub drand_network: String,
 
-    #[clap(long, default_value = "7672797f548f3f4748ac4bf3352fc6c6b6468c9ad40ad456a397545c6e2df5bf", help = "drand chain hash")]
+    #[clap(
+        long,
+        default_value = "7672797f548f3f4748ac4bf3352fc6c6b6468c9ad40ad456a397545c6e2df5bf",
+        help = "drand chain hash"
+    )]
     pub chain_hash: String,
 
-    #[clap(short, long, default_value = "360s", help = "lock file for duration (y/w/d/h/m/s/ms)")]
+    #[clap(
+        short,
+        long,
+        default_value = "360s",
+        help = "lock file for duration (y/w/d/h/m/s/ms)"
+    )]
     pub refund_duration: humantime::Duration,
 }
 
@@ -127,7 +141,6 @@ pub struct TransferArgs {
     pub amount: f64,
 }
 
-
 #[derive(Clone, Args)]
 pub struct UniswapArgs {
     #[clap(flatten)]
@@ -137,13 +150,12 @@ pub struct UniswapArgs {
     pub target_erc20: String,
 }
 
-
 #[derive(Clone, Args)]
 pub struct BuyNFTArgs {
     #[clap(flatten)]
     pub base_args: TransferArgs,
 
-    #[clap(short= 'c', long, help = "The NFT address you want to buy")]
+    #[clap(short = 'c', long, help = "The NFT address you want to buy")]
     pub nft_contract: Address,
 
     #[clap(short = 'i', long, help = "The NFT id you want to buy")]
@@ -187,5 +199,5 @@ pub enum VTCMethod {
     #[strum(serialize = "htlp")]
     HTLP,
     #[strum(serialize = "tlock")]
-    TLock
+    TLock,
 }
